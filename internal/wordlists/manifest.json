@@ -1,0 +1,184 @@
+{
+  "lists": [
+    {
+      "name": "raft-small-dirs",
+      "tags": ["directory", "small", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-small-directories.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~19KB",
+      "desc": "SecLists RAFT small directory list (~870 entries)"
+    },
+    {
+      "name": "raft-medium-dirs",
+      "tags": ["directory", "medium", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-medium-directories.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~145KB",
+      "desc": "SecLists RAFT medium directory list (~30k entries)"
+    },
+    {
+      "name": "raft-large-dirs",
+      "tags": ["directory", "large", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-large-directories.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~300KB",
+      "desc": "SecLists RAFT large directory list (~62k entries)"
+    },
+    {
+      "name": "raft-medium-files",
+      "tags": ["files", "medium", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-medium-files.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~80KB",
+      "desc": "SecLists RAFT medium file list (~17k entries)"
+    },
+    {
+      "name": "raft-large-files",
+      "tags": ["files", "large", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-large-files.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~170KB",
+      "desc": "SecLists RAFT large file list (~37k entries)"
+    },
+    {
+      "name": "raft-medium-words",
+      "tags": ["words", "medium", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-medium-words.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~100KB",
+      "desc": "SecLists RAFT medium words (~63k entries)"
+    },
+    {
+      "name": "common-wordlist",
+      "tags": ["directory", "small", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~36KB",
+      "desc": "SecLists common.txt — fast general purpose (~4500 entries)"
+    },
+    {
+      "name": "orwa-micro",
+      "tags": ["directory", "files", "small", "orwagodfather"],
+      "url": "https://raw.githubusercontent.com/orwagodfather/WordList/main/onelistforallmicro.txt",
+      "license": "check-repo",
+      "sha256": "",
+      "size": "varies",
+      "desc": "orwagodfather OneListForAll micro — curated multi-category"
+    },
+    {
+      "name": "orwa-short",
+      "tags": ["directory", "files", "medium", "orwagodfather"],
+      "url": "https://raw.githubusercontent.com/orwagodfather/WordList/main/onelistforallshort.txt",
+      "license": "check-repo",
+      "sha256": "",
+      "size": "varies",
+      "desc": "orwagodfather OneListForAll short"
+    },
+    {
+      "name": "orwa-full",
+      "tags": ["directory", "files", "large", "orwagodfather"],
+      "url": "https://raw.githubusercontent.com/orwagodfather/WordList/main/onelistforall.txt",
+      "license": "check-repo",
+      "sha256": "",
+      "size": "varies",
+      "desc": "orwagodfather OneListForAll full — comprehensive"
+    },
+    {
+      "name": "n0kovo-small",
+      "tags": ["subdomain", "small", "n0kovo"],
+      "url": "https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_small.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~4MB",
+      "desc": "n0kovo subdomains small (~100k entries)"
+    },
+    {
+      "name": "n0kovo-medium",
+      "tags": ["subdomain", "medium", "n0kovo"],
+      "url": "https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_medium.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~30MB",
+      "desc": "n0kovo subdomains medium (~1M entries)"
+    },
+    {
+      "name": "n0kovo-large",
+      "tags": ["subdomain", "large", "n0kovo"],
+      "url": "https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_large.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~90MB",
+      "desc": "n0kovo subdomains large (~3M entries)"
+    },
+    {
+      "name": "seclists-subs-top1m",
+      "tags": ["subdomain", "large", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~40KB",
+      "desc": "SecLists top 5000 subdomains"
+    },
+    {
+      "name": "seclists-subs-top110k",
+      "tags": ["subdomain", "large", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-110000.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~1MB",
+      "desc": "SecLists top 110k subdomains"
+    },
+    {
+      "name": "jhaddix-all",
+      "tags": ["subdomain", "huge", "jhaddix"],
+      "url": "https://gist.githubusercontent.com/jhaddix/86a06c5dc309d08580a018c66354a056/raw/all.txt",
+      "license": "check-source",
+      "sha256": "",
+      "size": "~8MB",
+      "desc": "Jhaddix all.txt — massive compiled subdomain list"
+    },
+    {
+      "name": "assetnote-best-dns",
+      "tags": ["subdomain", "huge", "assetnote"],
+      "url": "https://wordlists-cdn.assetnote.io/data/manual/best-dns-wordlist.txt",
+      "license": "see-site",
+      "sha256": "",
+      "size": "~9MB",
+      "desc": "Assetnote best DNS wordlist — algorithmically generated from real data"
+    },
+    {
+      "name": "assetnote-best-content",
+      "tags": ["directory", "files", "huge", "assetnote"],
+      "url": "https://wordlists-cdn.assetnote.io/data/manual/best-content-wordlist.txt",
+      "license": "see-site",
+      "sha256": "",
+      "size": "varies",
+      "desc": "Assetnote best web content wordlist"
+    },
+    {
+      "name": "dirsearch-db",
+      "tags": ["directory", "files", "medium", "dirsearch"],
+      "url": "https://raw.githubusercontent.com/maurosoria/dirsearch/master/db/dicc.txt",
+      "license": "GPL-3.0",
+      "sha256": "",
+      "size": "~35KB",
+      "desc": "dirsearch built-in dictionary (~20k entries)"
+    },
+    {
+      "name": "params-small",
+      "tags": ["params", "small", "seclists"],
+      "url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/burp-parameter-names.txt",
+      "license": "MIT",
+      "sha256": "",
+      "size": "~35KB",
+      "desc": "Burp-style parameter names for parameter fuzzing"
+    }
+  ]
+}

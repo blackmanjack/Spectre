@@ -1,0 +1,47 @@
+# SPECTRE service probes — derived from nmap-service-probes concepts
+# Format: PROBE <proto> <name> <probe_hex_or_string>
+# MATCH: <service> <pattern> <version_template>
+# See NOTICE for attribution.
+
+PROBE TCP NULL
+MATCH ftp m|^220.*FTP| p/FTP/
+MATCH ssh m|^SSH-(\d[\d.]+)| v/$1/
+MATCH smtp m|^220.*SMTP| p/SMTP/
+MATCH http m|^HTTP/1\.[01] \d{3}| p/HTTP/
+MATCH pop3 m|^\+OK.*POP3| p/POP3/
+MATCH imap m|^\* OK.*IMAP| p/IMAP/
+MATCH mysql m|^\x4a\x00\x00\x00| p/MySQL/
+MATCH rdp m|^\x03\x00| p/RDP/
+
+PROBE TCP HTTP "GET / HTTP/1.0\r\n\r\n"
+MATCH http m|^HTTP/1\.[01] (\d{3})| p/HTTP/ v/$1/
+MATCH http m|Server: ([^\r\n]+)| p/$1/
+SOFTMATCH http m|html|i
+
+PROBE TCP HTTPS "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n"
+MATCH https m|^HTTP/| p/HTTPS/
+
+PROBE TCP SSH ""
+MATCH ssh m|^SSH-(\d[\d.]+)-(\S+)| p/$2/ v/$1/
+
+PROBE TCP FTP ""
+MATCH ftp m|^220[- ](.{1,100})| p/FTP/ i/$1/
+
+PROBE TCP SMTP ""
+MATCH smtp m|^220[- ](.{1,100})| p/SMTP/ i/$1/
+
+PROBE TCP MYSQL "\x0a"
+MATCH mysql m|^\x4a\x00\x00\x00\x0a([\d.]+)| p/MySQL/ v/$1/
+
+PROBE UDP DNS "\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+MATCH dns m|.| p/DNS/
+
+PROBE UDP SNMP "\x30\x26\x02\x01\x00\x04\x06public\xa0\x19"
+MATCH snmp m|^\x30| p/SNMP/
+
+PROBE TCP REDIS "*1\r\n$4\r\nPING\r\n"
+MATCH redis m|^\+PONG| p/Redis/
+MATCH redis m|^-ERR| p/Redis/
+
+PROBE TCP MONGODB "\x41\x00\x00\x00\x3a\x30\x00\x00\xff\xff\xff\xff\xd4\x07\x00\x00\x00\x00\x00\x00test\x2e\x24cmd\x00\x00\x00\x00\x00\xff\xff\xff\xff\x13\x00\x00\x00\x10listDatabases\x00\x01\x00\x00\x00\x00"
+MATCH mongodb m|^\x..\x00\x00| p/MongoDB/

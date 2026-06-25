@@ -1,0 +1,28 @@
+SPECTRE — Scan, Probe, Enumerate, Crawl, Trace, Recon, Examine
+Copyright (c) 2026 spectre-tool contributors
+
+Third-party data attributions:
+
+1. Nmap service probes (wordlists/service-probes.txt)
+   Source: https://github.com/nmap/nmap (nmap-service-probes)
+   License: Nmap Public Source License (NPSL)
+   Copyright: Gordon Lyon (Fyodor) and contributors
+   Note: data file only, not compiled code.
+
+2. Nmap OS fingerprints (wordlists/os-fingerprints.txt)
+   Source: https://github.com/nmap/nmap (nmap-os-db)
+   License: Nmap Public Source License (NPSL)
+   Copyright: Gordon Lyon (Fyodor) and contributors
+   Note: data file only, not compiled code.
+
+Third-party wordlists fetched on-demand (NOT bundled):
+   SecLists     — https://github.com/danielmiessler/SecLists  (MIT)
+   OneListForAll — https://github.com/orwagodfather/WordList  (check repo)
+   n0kovo-subdomains — https://github.com/n0kovo/n0kovo_subdomains (MIT)
+   Assetnote    — https://wordlists.assetnote.io              (see site)
+   Jhaddix all.txt — https://gist.github.com/jhaddix          (see repo)
+   dirsearch    — https://github.com/maurosoria/dirsearch      (GPL-3.0)
+
+Fetched wordlists remain under their respective upstream licenses.
+SPECTRE does not redistribute them; it downloads them from their
+official sources on user request.
