@@ -77,6 +77,19 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 
 	wordCh := opts.WordCh
 
+	// Cache words once for reuse across recursion depths. Re-opening and
+	// re-scanning the wordlist file for every discovered directory turns a
+	// single-pass scan into O(dirs * wordlist_size) I/O; with large wordlists
+	// (Assetnote-class, multi-MB) that defeats the "faster than alternatives"
+	// goal. We pay one read + memory cost up front instead.
+	var cachedWords []string
+	if opts.Recursive && opts.MaxDepth > 0 {
+		for w := range wordCh {
+			cachedWords = append(cachedWords, w)
+		}
+		wordCh = sliceToChannel(cachedWords)
+	}
+
 	out := make(chan output.Result, 128)
 	done := make(chan struct{})
 	go func() {
@@ -98,26 +111,27 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 		atomic.AddInt64(&summary.Total, 1)
 	}, &summary.Total)
 
-	// Recursive descent
+	// Recursive descent — reuses cachedWords instead of re-reading the wordlist
+	// file per directory (see comment above).
 	if opts.Recursive && opts.MaxDepth > 0 {
 		depth := 1
 		for depth <= opts.MaxDepth && len(foundDirs) > 0 {
 			var nextDirs []string
 			for _, dir := range foundDirs {
-				subURL := strings.TrimRight(opts.URL, "/") + dir
-				// Reload wordlist for each subdirectory
-				if opts.WordCh == nil {
-					wl := utils.NewWordlistLoader(nil)
-					subCh, err := wl.Load("", "directories.txt")
-					if err != nil {
-						continue
-					}
-					var subdirs []string
-					fuzz(ctx, subURL, subCh, opts, client, rl, cfg, out, func(path string) {
-						subdirs = append(subdirs, dir+path)
-					}, &summary.Total)
-					nextDirs = append(nextDirs, subdirs...)
+				safeDir, ok := sanitizeDirPath(dir)
+				if !ok {
+					// Reject path-traversal or otherwise unsafe directory names
+					// surfaced by the wordlist (e.g. "/../admin") rather than
+					// folding them into the recursive URL.
+					fmt.Fprintf(os.Stderr, "[warn] skipping unsafe recursive path %q\n", dir)
+					continue
 				}
+				subURL := strings.TrimRight(opts.URL, "/") + safeDir
+				var subdirs []string
+				fuzz(ctx, subURL, sliceToChannel(cachedWords), opts, client, rl, cfg, out, func(path string) {
+					subdirs = append(subdirs, safeDir+path)
+				}, &summary.Total)
+				nextDirs = append(nextDirs, subdirs...)
 			}
 			foundDirs = nextDirs
 			depth++
@@ -208,6 +222,35 @@ func fuzz(
 		}()
 	}
 	wg.Wait()
+}
+
+// sliceToChannel re-streams a cached word slice as a channel so fuzz() can
+// consume it the same way it consumes a freshly loaded wordlist.
+func sliceToChannel(words []string) <-chan string {
+	ch := make(chan string, len(words))
+	for _, w := range words {
+		ch <- w
+	}
+	close(ch)
+	return ch
+}
+
+// sanitizeDirPath rejects directory paths that could escape the discovered
+// directory's URL scope (path traversal, query/fragment injection) before
+// they are concatenated into a recursive fuzz URL. Returns the cleaned path
+// and false if the input should be skipped entirely.
+func sanitizeDirPath(dir string) (string, bool) {
+	if dir == "" || !strings.HasPrefix(dir, "/") {
+		return "", false
+	}
+	if strings.Contains(dir, "..") || strings.ContainsAny(dir, "?#") {
+		return "", false
+	}
+	// Collapse accidental double slashes from prior concatenation.
+	for strings.Contains(dir, "//") {
+		dir = strings.ReplaceAll(dir, "//", "/")
+	}
+	return dir, true
 }
 
 // isDirectory heuristically determines if a result is a browsable directory.

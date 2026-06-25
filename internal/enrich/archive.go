@@ -18,7 +18,7 @@ func WaybackURLs(ctx context.Context, domain string, client *http.Client) <-chan
 		defer close(out)
 		// CDX API: match_type=domain returns all URLs under the domain
 		apiURL := fmt.Sprintf(
-			"http://web.archive.org/cdx/search/cdx?url=*.%s/*&output=text&fl=original&collapse=urlkey&limit=50000",
+			"https://web.archive.org/cdx/search/cdx?url=*.%s/*&output=text&fl=original&collapse=urlkey&limit=50000",
 			url.QueryEscape(domain),
 		)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)

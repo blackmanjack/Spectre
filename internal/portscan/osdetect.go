@@ -3,9 +3,9 @@ package portscan
 import (
 	"bufio"
 	"io/fs"
-	"net"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // OSFingerprint represents one entry in the OS fingerprint database.
@@ -168,19 +168,13 @@ func PassiveOSDetect(db *OSDatabase, ttl, windowSize int) OSResult {
 	}
 }
 
-// MeasureTCPParams dials the target and extracts TTL+window from the response.
-// This is a best-effort passive observation during the connect phase.
-func MeasureTCPParams(target string, port int) (ttl, windowSize int) {
-	// On most systems we can't easily get TTL from net.Conn.
-	// We do a basic connect and check RemoteAddr. The actual TTL requires
-	// raw sockets or packet capture. Return 0 if not available.
-	conn, err := net.DialTimeout("tcp", target+":"+strconv.Itoa(port), 2e9)
-	if err != nil {
-		return 0, 0
-	}
-	conn.Close()
-	// TTL not accessible via standard net.Conn; return 0 for passive detection
-	return 0, 0
+// MeasureTCPParams dials the target and extracts TTL (+ window size where
+// available) from the live connection's socket options.
+// Implemented per-platform in ttl_unix.go / ttl_windows.go. The bool result
+// tells the caller whether a real measurement was obtained — callers must
+// not fabricate an OS guess when ok is false; report "unavailable" instead.
+func MeasureTCPParams(target string, port int, timeout time.Duration) (ttl, windowSize int, ok bool) {
+	return dialAndMeasure(target, port, timeout)
 }
 
 func abs(x int) int {

@@ -71,7 +71,9 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 	seen := &sync.Map{}
 	out := make(chan output.Result, 128)
 
-	// Sink: write results
+	// Sink: write results. Closing `out` (deferred below) always unblocks this
+	// goroutine, even if Run returns early on an error — otherwise the sink
+	// would hang forever on `range out` and the process could not exit cleanly.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -84,6 +86,10 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 				summary.Passive++
 			}
 		}
+	}()
+	defer func() {
+		close(out)
+		<-done
 	}()
 
 	srcs := buildSources(opts.Sources)
@@ -131,8 +137,6 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 		}, out)
 	}
 
-	close(out)
-	<-done
 	summary.Duration = time.Since(start)
 	return summary, nil
 }

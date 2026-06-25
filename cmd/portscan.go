@@ -48,7 +48,7 @@ func init() {
 	f.IntVarP(&psConcurrency, "concurrency", "c", 5000, "Discovery goroutines")
 	f.IntVar(&psTimeout, "timeout", 800, "Per-port timeout (milliseconds)")
 	f.Float64VarP(&psRate, "rate", "r", 0, "Packets/sec (0 = use --timing template)")
-	f.StringVar(&psScanType, "scan-type", "connect", "Scan type: syn|connect|fin|null|xmas|ack (syn needs root)")
+	f.StringVar(&psScanType, "scan-type", "connect", "Scan type: connect is implemented; syn|fin|null|xmas|ack currently fall back to connect (raw-socket probe loop not yet wired up)")
 	f.BoolVar(&psUDP, "udp", false, "Also run UDP scan")
 	f.BoolVar(&psService, "service", false, "Enable service/banner detection")
 	f.BoolVar(&psOS, "os", false, "Enable OS fingerprinting")

@@ -55,8 +55,13 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 		ac = NewAdaptiveController(rl, rps)
 	}
 
-	if !utils.RawSockAvailable && (opts.ScanType == "syn" || opts.ScanType == "") {
-		fmt.Fprintln(os.Stderr, "[warn] Raw socket unavailable (no root/admin) — using TCP connect scan")
+	rawOnlyTypes := map[string]bool{"syn": true, "fin": true, "null": true, "xmas": true, "ack": true}
+	if rawOnlyTypes[opts.ScanType] {
+		if !utils.RawSockAvailable {
+			fmt.Fprintf(os.Stderr, "[warn] Raw socket unavailable (no root/admin) for --scan-type=%s — using TCP connect scan\n", opts.ScanType)
+		} else {
+			fmt.Fprintf(os.Stderr, "[warn] --scan-type=%s is not yet wired to a raw-socket probe loop — using TCP connect confirmation (see confirmPort doc)\n", opts.ScanType)
+		}
 		opts.ScanType = "connect"
 	}
 
@@ -85,7 +90,11 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 	go func() {
 		defer close(work)
 		for _, p := range candidates {
-			work <- p
+			select {
+			case work <- p:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
@@ -136,16 +145,15 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 	// ── Phase 5: OS detection ──────────────────────────────────────────────
 	var osResult OSResult
 	if opts.OS && len(confirmed) > 0 {
-		// Passive first: use TTL from first open port
-		ttl, win := MeasureTCPParams(opts.Target, confirmed[0].Port)
-		osResult = PassiveOSDetect(osDB, ttl, win)
-		if osResult.Name == "" || osResult.Confidence < 50 {
-			// Fall back to TTL-only guess
-			osResult = PassiveOSDetect(osDB, 64, 0) // default guess
-		}
-		summary.OS = osResult
-		if !opts.Silent {
-			fmt.Fprintf(os.Stderr, "[spectre] OS: %s (%d%% confidence)\n", osResult.Name, osResult.Confidence)
+		ttl, win, measured := MeasureTCPParams(opts.Target, confirmed[0].Port, opts.Timeout)
+		if measured {
+			osResult = PassiveOSDetect(osDB, ttl, win)
+			summary.OS = osResult
+			if !opts.Silent {
+				fmt.Fprintf(os.Stderr, "[spectre] OS: %s (%d%% confidence)\n", osResult.Name, osResult.Confidence)
+			}
+		} else if !opts.Silent {
+			fmt.Fprintln(os.Stderr, "[spectre] OS: unavailable on this platform/connection (no fabricated guess)")
 		}
 	}
 
@@ -174,16 +182,23 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 	return summary, nil
 }
 
-// confirmPort probes a port with multiple techniques to confirm its state.
+// confirmPort re-verifies a Phase 1 candidate with TCP connect retries.
+//
+// NOTE: this is connect-scan confirmation only. The raw-socket SYN/ACK/FIN/
+// NULL/XMAS multi-probe sequence described in the design doc requires a
+// packet capture/correlation loop (see utils.CraftTCP) that is not wired up
+// yet — --scan-type values other than "connect" currently fall back to this
+// same connect-based confirmation. Run() warns the user when a raw-socket
+// scan type is requested but the multi-probe path isn't active, rather than
+// silently claiming firewall-state discrimination it doesn't perform.
 func confirmPort(ctx context.Context, target string, port int, timeout time.Duration, retry int) PortState {
-	// TCP connect is our reliable fallback for state confirmation
 	for i := 0; i <= retry; i++ {
 		if connectProbe(ctx, target, port, timeout) {
 			return StateOpen
 		}
 	}
 	// Port didn't respond — determine filtered vs closed
-	// (Without raw sockets we can't distinguish; return filtered)
+	// (Without the raw-socket multi-probe path we can't distinguish; return filtered)
 	return StateFiltered
 }
 

@@ -112,6 +112,9 @@ func (r *Resolver) resolveOne(spec string) ([]wordSource, error) {
 
 	// Tag group: "category:size" e.g. "directory:medium", "subdomain:large"
 	if strings.Contains(spec, ":") {
+		if r.catalog == nil {
+			return nil, fmt.Errorf("no wordlist catalog loaded — cannot resolve group %q", spec)
+		}
 		tags := strings.Split(spec, ":")
 		entries := r.catalog.ByTags(tags...)
 		var sources []wordSource
@@ -132,7 +135,7 @@ func (r *Resolver) resolveOne(spec string) ([]wordSource, error) {
 	}
 
 	// Named list
-	if e := r.catalog.ByName(spec); e != nil {
+	if e := catalogByName(r.catalog, spec); e != nil {
 		if IsPulled(e.Name) {
 			p, _ := LocalPath(e.Name)
 			return []wordSource{{name: e.Name, open: func() (<-chan string, error) {
@@ -166,6 +169,14 @@ func (r *Resolver) resolveOne(spec string) ([]wordSource, error) {
 	}
 
 	return nil, fmt.Errorf("unknown wordlist %q — check `spectre wordlists list`", spec)
+}
+
+// catalogByName is a nil-safe wrapper around Catalog.ByName.
+func catalogByName(c *Catalog, name string) *Entry {
+	if c == nil {
+		return nil
+	}
+	return c.ByName(name)
 }
 
 func fileChannel(path string) (<-chan string, error) {
