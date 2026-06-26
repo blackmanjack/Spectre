@@ -293,6 +293,52 @@ spectre webtech https://example.com
 
 ---
 
+## `spectre breach` — breach/leak exposure check
+
+```
+spectre breach <domain-or-email> [flags]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--timeout` | 15 | Request timeout (seconds) |
+| `--rate` | 2 | Requests per second against provider APIs |
+| `--skip-paste` | off | Skip the free Pastebin scraper |
+| `--hibp-key` | — | HaveIBeenPwned API key ([haveibeenpwned.com/API/Key](https://haveibeenpwned.com/API/Key), paid) |
+| `--dehashed-email` | — | DeHashed account email |
+| `--dehashed-key` | — | DeHashed API key |
+
+This is **clear-web breach/leak checking**, not dark-web (Tor/.onion) access —
+SPECTRE doesn't crawl `.onion` sites, and that's a deliberate scope decision,
+not a missing feature: Tor access is a different protocol/threat model from
+HTTP recon, and the legally useful signal (has this domain/email leaked
+anywhere) lives entirely on the clear web in breach databases and paste sites.
+
+Three sources, each independently skippable/gated and never silently treated
+as "clean" if it can't run:
+
+- **Pastebin scraping** (free, no key) — polls Pastebin's public recent-paste
+  feed for mentions of your query. Only sees the last ~30 minutes of public
+  pastes (no historical search on the free tier), and the scrape endpoint is
+  IP-whitelisted by Pastebin — unwhitelisted IPs get HTTP 403, which surfaces
+  as an honest "skipped" line, not a fake "no leaks found."
+- **HaveIBeenPwned** (bring your own API key via `--hibp-key`) — email-only;
+  HIBP's public API has no domain-breach lookup.
+- **DeHashed** (bring your own account via `--dehashed-email`/`--dehashed-key`)
+  — supports both domain and email queries.
+
+SPECTRE ships no hardcoded paid-API credentials and contacts no breach
+database unless you provide your own key — this is a generic framework you
+point at the providers you already pay for, not a bundled service.
+
+**Example:**
+```bash
+spectre breach example.com
+spectre breach user@example.com --hibp-key $HIBP_KEY --dehashed-email me@x.com --dehashed-key $DEHASHED_KEY
+```
+
+---
+
 ## `spectre wordlists` — wordlist catalog manager
 
 SPECTRE does **not** bundle third-party wordlists (SecLists, OneListForAll,
@@ -357,6 +403,9 @@ pretending it does. As of this writing:
 | `portscan --scan-type syn/fin/null/xmas/ack` | **Works on Unix with root/CAP_NET_RAW.** Sends the real crafted probe via a raw IP socket and classifies the response per RFC 793 (SYN: SYN-ACK=open, RST=closed; ACK: RST=unfiltered; FIN/NULL/XMAS: RST=closed, silence=open\|filtered). **Does not work on Windows, including under Administrator** — Windows has forbidden sending TCP data over raw sockets since Vista, so `net.ListenIP("ip4:tcp", ...)` always fails there; SPECTRE detects this and falls back to `connect` with an explicit warning rather than silently mislabeling results. One documented side-effect on Unix: the local kernel doesn't recognize our hand-crafted handshake and sends its own RST after we've already read the target's real response — harmless to our classification, but an extra packet a target-side IDS could observe. |
 | `portscan --os` | Real on Unix (reads the live `IP_TTL` socket option and matches against an embedded fingerprint table). On Windows, or whenever the measurement fails, it correctly reports "unavailable" — it does not fabricate a guess. |
 | WAF evasion (`dirfuzz --waf-evasion`) | **Works** — implemented inline in `internal/dirfuzz` and verified end-to-end. |
+| `breach` (paste-sites) | **Works**, with an honest ceiling: Pastebin's free scrape endpoint only covers the last ~30 minutes of public pastes and is IP-whitelisted (unwhitelisted IPs see HTTP 403, reported as a skip, not a false "clean" result). |
+| `breach` (HIBP/DeHashed) | **Works** once you supply your own API key/account — see `spectre breach`. No keys are bundled; without one, that provider is explicitly skipped rather than silently omitted. |
+| Dark-web (Tor/`.onion`) access | **Not implemented, by design.** `spectre breach` covers clear-web breach/leak exposure (paste sites + bring-your-own breach-database APIs), which is where the legally and practically useful signal lives. Actual `.onion` crawling is a different protocol/threat model and is out of scope for this tool. |
 
 If something here still doesn't cover your use case — decoy-IP scanning,
 packet fragmentation, or running raw-socket scan types on Windows — say so;

@@ -14,6 +14,7 @@ const (
 	TypePort      ResultType = "port"
 	TypeDNS       ResultType = "dns"
 	TypeWebTech   ResultType = "webtech"
+	TypeBreach    ResultType = "breach"
 )
 
 // Result is the unified result type for all modules.

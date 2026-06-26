@@ -24,7 +24,10 @@ type Options struct {
 	Concurrency int
 	Timeout     time.Duration
 	RatePerSec  float64
-	ScanType    string // syn|connect|fin|null|xmas|ack
+	ScanType    string   // syn|connect|fin|null|xmas|ack
+	Decoys      []string // decoy source IPs (raw-socket scans only; "ME" = real outbound IP)
+	Fragment    bool     // split TCP header across two IP fragments
+	FragMTU     int      // bytes of TCP header in first fragment (default 8)
 	UDP         bool
 	Service     bool  // enable banner/service detection
 	OS          bool  // enable OS fingerprinting
@@ -134,7 +137,7 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 				if err := rl.Wait(ctx); err != nil {
 					return
 				}
-				state := confirmPort(ctx, opts.Target, port, opts.Timeout, opts.Retry, opts.ScanType, rawScanner)
+				state := confirmPort(ctx, opts.Target, port, opts.Timeout, opts.Retry, opts.ScanType, rawScanner, opts.Decoys, opts.Fragment, opts.FragMTU)
 				if state == StateOpen || state == StateOpenFiltered {
 					r := PortResult{
 						Port:      port,
@@ -252,9 +255,9 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 // Without a RawScanner (the common case — no root/admin, or --scan-type
 // connect), this falls back to TCP-connect confirmation, which can only
 // distinguish open from not-open; it cannot discriminate filtered vs closed.
-func confirmPort(ctx context.Context, target string, port int, timeout time.Duration, retry int, scanType string, raw *utils.RawScanner) PortState {
+func confirmPort(ctx context.Context, target string, port int, timeout time.Duration, retry int, scanType string, raw *utils.RawScanner, decoys []string, fragment bool, fragMTU int) PortState {
 	if raw != nil {
-		return confirmPortRaw(ctx, target, port, timeout, retry, scanType, raw)
+		return confirmPortRaw(ctx, target, port, timeout, retry, scanType, raw, decoys, fragment, fragMTU)
 	}
 	for i := 0; i <= retry; i++ {
 		if connectProbe(ctx, target, port, timeout) {

@@ -74,6 +74,8 @@ func (w *TextWriter) formatPlain(r Result) string {
 			extra = " (" + r.Extra + ")"
 		}
 		return fmt.Sprintf("[webtech] %s%s", r.Value, extra)
+	case TypeBreach:
+		return fmt.Sprintf("[%s] %s — %s", r.Source, r.Value, r.Extra)
 	default:
 		return fmt.Sprintf("[%s] %s", r.Type, r.Value)
 	}
@@ -124,6 +126,11 @@ func (w *TextWriter) formatColor(r Result) string {
 		return fmt.Sprintf("%s[webtech]%s %s%s%s%s",
 			colorCyan, colorReset,
 			colorGreen, r.Value, colorReset, extra)
+
+	case TypeBreach:
+		src := colorRed + colorBold + "[" + r.Source + "]" + colorReset
+		val := colorYellow + r.Value + colorReset
+		return fmt.Sprintf("%s %s %s%s%s", src, val, colorDim, r.Extra, colorReset)
 
 	default:
 		return fmt.Sprintf("[%s] %s", r.Type, r.Value)
