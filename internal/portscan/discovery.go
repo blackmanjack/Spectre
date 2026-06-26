@@ -101,7 +101,8 @@ func expandPortRange(spec string) []int {
 			}
 		} else {
 			var p int
-			if fmt.Sscanf(part, "%d", &p) == 1 && p > 0 && p <= 65535 {
+			n, _ := fmt.Sscanf(part, "%d", &p)
+			if n == 1 && p > 0 && p <= 65535 {
 				seen[p] = true
 			}
 		}
