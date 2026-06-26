@@ -21,6 +21,9 @@ go mod verify
 
 ## Quick test
 
+See [README.md](README.md) for full flag documentation and the list of
+features that are accepted as flags but not yet wired up.
+
 ```bash
 # Subdomain passive enumeration
 ./spectre subdomain -d example.com --passive
@@ -37,11 +40,11 @@ go mod verify
 # Directory fuzzing
 ./spectre dirfuzz -u https://example.com -x php,html
 
-# Port scan (no root needed — TCP connect fallback)
+# Port scan — no root/admin needed, TCP connect is the only implemented scan type today
 ./spectre portscan -t 192.168.1.1 -p 80,443,22,8080 --service
 
-# Port scan all ports (root recommended for SYN scan)
-sudo ./spectre portscan -t 192.168.1.1 --all-ports --service --os
+# Port scan all ports with OS detection (Unix: real TTL read; Windows: reports unavailable)
+./spectre portscan -t 192.168.1.1 --all-ports --service --os
 
 # Wordlist management
 ./spectre wordlists list
