@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/spectre-tool/spectre/internal/evasion"
 	"github.com/spectre-tool/spectre/internal/output"
 	"github.com/spectre-tool/spectre/internal/utils"
 )
@@ -42,6 +44,16 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 	// Resolve port list
 	ports := resolvePortSpec(opts)
 
+	// Timing template drives more than just rate: T0-T2 (paranoid/sneaky/polite)
+	// also shuffle probe order so there's no sequential-sweep signature, and
+	// jitter each probe's delay so cadence isn't a fixed, easily-fingerprinted
+	// pattern. T3+ skip the per-probe jitter sleep — at that speed the jitter
+	// range is sub-millisecond and not worth the scheduling overhead.
+	tmpl := evasion.GetTemplate(opts.Timing)
+	evasion.ShuffleInts(ports)
+	useJitter := opts.Timing == "T0" || opts.Timing == "T1" || opts.Timing == "T2" ||
+		opts.Timing == "paranoid" || opts.Timing == "sneaky" || opts.Timing == "polite"
+
 	// Load databases
 	probeDB, _ := LoadProbeDB(opts.EmbeddedFS)
 	osDB := LoadOSDB(opts.EmbeddedFS)
@@ -55,14 +67,30 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 		ac = NewAdaptiveController(rl, rps)
 	}
 
+	// Raw-socket scan types (syn/fin/null/xmas/ack) need a privileged raw IP
+	// socket to send crafted segments and correlate responses. If that's not
+	// available, fall back to connect-scan confirmation and say so explicitly
+	// — never silently relabel a connect-scan result as if it came from SYN.
 	rawOnlyTypes := map[string]bool{"syn": true, "fin": true, "null": true, "xmas": true, "ack": true}
+	var rawScanner *utils.RawScanner
 	if rawOnlyTypes[opts.ScanType] {
 		if !utils.RawSockAvailable {
 			fmt.Fprintf(os.Stderr, "[warn] Raw socket unavailable (no root/admin) for --scan-type=%s — using TCP connect scan\n", opts.ScanType)
+			opts.ScanType = "connect"
+		} else if srcIP := outboundIP(opts.Target); srcIP == nil {
+			fmt.Fprintf(os.Stderr, "[warn] Could not determine outbound source IP for --scan-type=%s — using TCP connect scan\n", opts.ScanType)
+			opts.ScanType = "connect"
 		} else {
-			fmt.Fprintf(os.Stderr, "[warn] --scan-type=%s is not yet wired to a raw-socket probe loop — using TCP connect confirmation (see confirmPort doc)\n", opts.ScanType)
+			var err error
+			rawScanner, err = utils.NewRawScanner(srcIP)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[warn] Failed to open raw socket for --scan-type=%s (%v) — using TCP connect scan\n", opts.ScanType, err)
+				opts.ScanType = "connect"
+			} else {
+				defer rawScanner.Close()
+				go rawScanner.Listen(ctx)
+			}
 		}
-		opts.ScanType = "connect"
 	}
 
 	summary.Total = len(ports)
@@ -71,7 +99,7 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 	if !opts.Silent {
 		fmt.Fprintf(os.Stderr, "[spectre] Phase 1: Discovery — %d ports, concurrency=%d\n", len(ports), opts.Concurrency)
 	}
-	candidates := discoverOpenPorts(ctx, opts.Target, ports, opts.Concurrency, opts.Timeout, rl, ac)
+	candidates := discoverOpenPorts(ctx, opts.Target, ports, opts.Concurrency, opts.Timeout, rl, ac, tmpl, useJitter)
 
 	if len(candidates) == 0 {
 		summary.Duration = time.Since(start).String()
@@ -106,7 +134,7 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 				if err := rl.Wait(ctx); err != nil {
 					return
 				}
-				state := confirmPort(ctx, opts.Target, port, opts.Timeout, opts.Retry)
+				state := confirmPort(ctx, opts.Target, port, opts.Timeout, opts.Retry, opts.ScanType, rawScanner)
 				if state == StateOpen || state == StateOpenFiltered {
 					r := PortResult{
 						Port:      port,
@@ -139,6 +167,34 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 			confirmed[i].Version = ver
 			confirmed[i].Banner = banner
 			confirmed[i].Confidence = conf
+		}
+	}
+
+	// ── Phase 3: UDP scan ───────────────────────────────────────────────────
+	if opts.UDP {
+		udpPorts := ports
+		if len(udpPorts) > 1000 && opts.TopN == 0 && !opts.AllPorts {
+			udpPorts = topPorts(1000) // UDP is slower per-port; cap unless explicitly requested
+		}
+		if !opts.Silent {
+			fmt.Fprintf(os.Stderr, "[spectre] Phase 3: UDP scan — %d ports\n", len(udpPorts))
+		}
+		udpResults := scanUDPPorts(ctx, opts.Target, udpPorts, opts.Concurrency, opts.Timeout, ac)
+		for _, r := range udpResults {
+			if r.State != StateOpen && r.State != StateOpenFiltered {
+				continue
+			}
+			confirmed = append(confirmed, PortResult{
+				Port:      r.Port,
+				Protocol:  "udp",
+				State:     r.State,
+				Service:   guessServiceByPort(r.Port),
+				Banner:    r.Banner,
+				Timestamp: time.Now(),
+			})
+		}
+		if !opts.Silent {
+			fmt.Fprintf(os.Stderr, "[spectre] Phase 3 done: %d UDP results (open or open|filtered)\n", len(udpResults))
 		}
 	}
 
@@ -182,16 +238,24 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 	return summary, nil
 }
 
-// confirmPort re-verifies a Phase 1 candidate with TCP connect retries.
+// confirmPort re-verifies a Phase 1 candidate.
 //
-// NOTE: this is connect-scan confirmation only. The raw-socket SYN/ACK/FIN/
-// NULL/XMAS multi-probe sequence described in the design doc requires a
-// packet capture/correlation loop (see utils.CraftTCP) that is not wired up
-// yet — --scan-type values other than "connect" currently fall back to this
-// same connect-based confirmation. Run() warns the user when a raw-socket
-// scan type is requested but the multi-probe path isn't active, rather than
-// silently claiming firewall-state discrimination it doesn't perform.
-func confirmPort(ctx context.Context, target string, port int, timeout time.Duration, retry int) PortState {
+// With a *utils.RawScanner (scanType is one of syn/fin/null/xmas/ack and raw
+// socket privilege was available), this sends the actual crafted probe and
+// classifies the state from the real response per RFC 793 semantics:
+//
+//	SYN  -> SYN+ACK received = open；RST received = closed；silence = filtered
+//	ACK  -> RST received = unfiltered (stateless fw passes ACK)；silence = filtered
+//	FIN/NULL/XMAS -> RST received = closed；silence = open|filtered (RFC 793:
+//	                  compliant stacks send nothing for an open port)
+//
+// Without a RawScanner (the common case — no root/admin, or --scan-type
+// connect), this falls back to TCP-connect confirmation, which can only
+// distinguish open from not-open; it cannot discriminate filtered vs closed.
+func confirmPort(ctx context.Context, target string, port int, timeout time.Duration, retry int, scanType string, raw *utils.RawScanner) PortState {
+	if raw != nil {
+		return confirmPortRaw(ctx, target, port, timeout, retry, scanType, raw)
+	}
 	for i := 0; i <= retry; i++ {
 		if connectProbe(ctx, target, port, timeout) {
 			return StateOpen
@@ -200,6 +264,87 @@ func confirmPort(ctx context.Context, target string, port int, timeout time.Dura
 	// Port didn't respond — determine filtered vs closed
 	// (Without the raw-socket multi-probe path we can't distinguish; return filtered)
 	return StateFiltered
+}
+
+// confirmPortRaw implements the real SYN/FIN/NULL/XMAS/ACK probe semantics
+// described above, using a shared RawScanner for send+correlate.
+func confirmPortRaw(ctx context.Context, target string, port int, timeout time.Duration, retry int, scanType string, raw *utils.RawScanner) PortState {
+	dstIP := net.ParseIP(target)
+	if dstIP == nil {
+		ips, err := net.LookupIP(target)
+		if err != nil || len(ips) == 0 {
+			return StateFiltered
+		}
+		dstIP = ips[0].To4()
+		if dstIP == nil {
+			return StateFiltered // raw scanner is IPv4-only
+		}
+	}
+
+	var flags uint8
+	switch scanType {
+	case "syn":
+		flags = utils.FlagSYN
+	case "ack":
+		flags = utils.FlagACK
+	case "fin":
+		flags = utils.FlagFIN
+	case "null":
+		flags = 0
+	case "xmas":
+		flags = utils.FlagFIN | utils.FlagURG | utils.FlagPSH
+	default:
+		flags = utils.FlagSYN
+	}
+
+	var lastResult utils.RawProbeResult
+	for i := 0; i <= retry; i++ {
+		r, err := raw.Probe(ctx, dstIP, port, flags, timeout)
+		if err != nil {
+			return StateFiltered
+		}
+		lastResult = r
+		if r.GotResponse {
+			break
+		}
+	}
+
+	switch scanType {
+	case "syn":
+		if lastResult.GotResponse && lastResult.Flags&utils.FlagRST != 0 {
+			return StateClosed
+		}
+		if lastResult.GotResponse && lastResult.Flags&utils.FlagSYN != 0 && lastResult.Flags&utils.FlagACK != 0 {
+			return StateOpen
+		}
+		return StateFiltered
+	case "ack":
+		if lastResult.GotResponse && lastResult.Flags&utils.FlagRST != 0 {
+			return StateUnfiltered
+		}
+		return StateFiltered
+	default: // fin, null, xmas — RFC 793: open ports stay silent
+		if lastResult.GotResponse && lastResult.Flags&utils.FlagRST != 0 {
+			return StateClosed
+		}
+		return StateOpenFiltered
+	}
+}
+
+// outboundIP determines which local IP the kernel would use to reach target,
+// by opening a throwaway UDP "connection" (no packet is actually sent — UDP
+// dial just resolves the route) and reading its local address.
+func outboundIP(target string) net.IP {
+	conn, err := net.Dial("udp4", net.JoinHostPort(target, "80"))
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	return addr.IP
 }
 
 // resolvePortSpec turns Options into a list of port integers.

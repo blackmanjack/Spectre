@@ -51,13 +51,24 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 	start := time.Now()
 	var summary Summary
 
-	client := utils.NewClient(utils.ClientConfig{
+	clientCfg := utils.ClientConfig{
 		Timeout:       opts.Timeout,
 		SkipTLSVerify: opts.SkipTLS,
 		FollowRedirs:  opts.FollowRedirs,
 		Cookies:       opts.Cookies,
 		ExtraHeaders:  opts.ExtraHeaders,
-	})
+	}
+
+	var client *http.Client
+	if opts.ProxyFile != "" {
+		proxyPool, err := utils.LoadProxyFile(opts.ProxyFile)
+		if err != nil {
+			return summary, fmt.Errorf("loading proxy file: %w", err)
+		}
+		client = proxyPool.NewHTTPClient(clientCfg)
+	} else {
+		client = utils.NewClient(clientCfg)
+	}
 
 	rl := utils.NewRateLimiter(opts.RatePerSec)
 

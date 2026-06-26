@@ -81,7 +81,7 @@ spectre subdomain -d <domain> [flags]
 | `-p, --passive` | off | Passive sources only, no DNS brute force |
 | `-b, --brute` | off | Brute force only, skip passive sources |
 | `--fast` | off | Passive-only, streaming, **no DNS resolve** — raw names printed as found, for head-to-head speed comparison against tools like `assetfinder` |
-| `--all` | off | Accepted by the flag parser. **Currently behaves identically to running with neither `--passive` nor `--brute`** (passive + brute together) — see [Known limitations](#known-limitations--honest-status) |
+| `--all` | off | Runs passive+brute, then the coverage maximizers: permutation, bounded recursive permutation, Wayback/CommonCrawl archive mining, GitHub code search, and search-engine dorking. Every candidate is resolved and deduplicated before being reported |
 | `-w, --wordlist` | embedded `subdomains.txt` | Wordlist path, or a catalog name/group (e.g. `subdomain:medium`) — see [Wordlists](#spectre-wordlists--wordlist-catalog-manager) |
 | `-c, --concurrency` | 50 | Concurrent DNS brute-force workers |
 | `-t, --timeout` | 10 | Per-request timeout (seconds) |
@@ -90,9 +90,17 @@ spectre subdomain -d <domain> [flags]
 | `--sources` | all | Comma-separated passive sources: `crtsh,hackertarget,alienvault,rapiddns,certspotter` |
 | `--skip-wildcard` | off | Skip wildcard-DNS detection before brute forcing |
 | `--proxies <file>` | none | Route passive-source HTTP requests through a proxy list (one `http://` or `socks5://` URL per line) for anti-block rotation |
+| `--github-token <token>` | none | Used by `--all`'s GitHub code-search enricher. Optional — GitHub search works unauthenticated at a much lower rate limit (60 req/hour) without it |
 
 **Passive sources queried:** crt.sh, HackerTarget, AlienVault OTX, RapidDNS, CertSpotter.
 Each runs concurrently; a slow or failing source doesn't block the others.
+
+**Coverage maximizers (`--all`):** on top of passive+brute, permutes discovered
+names against ~50 common patterns (`dev-`, `-staging`, `api2`, etc.), recursively
+permutes newly-confirmed names up to depth 2, mines Wayback Machine + CommonCrawl
+for historical URLs under the domain, searches GitHub code for mentions, and
+dorks a search engine with `site:domain -www`. Every candidate is resolved
+before being reported — unresolvable names are discarded, not printed.
 
 **Wildcard detection:** before brute forcing, three random subdomain labels are
 resolved. If all three resolve to the same IP set, that domain has wildcard DNS —
@@ -135,7 +143,7 @@ spectre dirfuzz -u <url> [flags]
 | `--waf-evasion` | off | Add IP-spoofing/host-override headers (`X-Forwarded-For`, `X-Original-URL`, etc.) to each request |
 | `--recursive` | off | Re-fuzz any discovered directory (status 200/301/302/403, no `.` in path) |
 | `--depth` | 3 | Maximum recursion depth |
-| `--proxies <file>` | none | Accepted but **not yet wired up** — see [Known limitations](#known-limitations--honest-status) |
+| `--proxies <file>` | none | Route requests through a proxy list (one `http://` or `socks5://` URL per line) for anti-block rotation |
 
 **Soft-404 auto-calibration:** before fuzzing, a random nonsense path is requested.
 If the server returns a non-404 (common with SPA/catch-all routing), that response's
@@ -169,38 +177,63 @@ spectre portscan -t <target> [flags]
 | `-c, --concurrency` | 5000 | Discovery-phase goroutines |
 | `--timeout` | 800 | Per-port timeout (**milliseconds**) |
 | `-r, --rate` | 0 | Packets/sec. `0` means "use `--timing` template instead" |
-| `--scan-type` | `connect` | See note below — only `connect` is actually implemented |
-| `--udp` | off | Accepted but **not implemented** — see [Known limitations](#known-limitations--honest-status) |
+| `--scan-type` | `connect` | `connect`, or `syn`/`fin`/`null`/`xmas`/`ack` — see note below |
+| `--udp` | off | Also scan UDP ports — see note below |
 | `--service` | off | Enable banner-grab + service fingerprinting on confirmed-open ports |
 | `--os` | off | Enable OS detection (TTL-based; **Unix only**, see below) |
 | `--retry` | 2 | Retries per port during Phase 2 confirmation |
 | `--adaptive` | on | Adaptive rate backoff on timeouts/ICMP storms |
-| `--timing` | `T4` | `T0`–`T5` (paranoid→insane) or named: `paranoid,sneaky,polite,normal,aggressive,insane`. Only changes the requests/sec rate — see [Known limitations](#known-limitations--honest-status) |
+| `--timing` | `T4` | `T0`–`T5` (paranoid→insane) or named: `paranoid,sneaky,polite,normal,aggressive,insane` — see note below |
 
 **Scan pipeline (what actually runs today):**
-1. **Discovery** — fast concurrent TCP-connect sweep across the requested ports
-2. **Confirmation** — re-verifies each candidate with TCP-connect + retries
-3. **Service detection** (`--service`) — grabs a banner and matches it against an
+1. **Discovery** — fast concurrent TCP-connect sweep across the requested ports,
+   shuffled and (on stealth timing tiers) jittered per the `--timing` template
+2. **Confirmation** — re-verifies each candidate. With `--scan-type connect`
+   (the default), this is TCP-connect + retries. With `syn`/`fin`/`null`/`xmas`/`ack`
+   *and* root/CAP_NET_RAW on Unix, this sends the real crafted probe via a raw
+   socket and classifies the response per RFC 793 — see below
+3. **UDP scan** (`--udp`) — sends a protocol-specific probe (DNS/NTP/SNMP) or a
+   generic datagram per port; `open` on a real response, `closed` only if an
+   ICMP port-unreachable is positively correlated (root/admin + Unix), otherwise
+   honestly reported as `open|filtered`
+4. **Service detection** (`--service`) — grabs a banner and matches it against an
    embedded probe database (`wordlists/service-probes.txt`, derived from
    `nmap-service-probes` format)
-4. **OS detection** (`--os`) — reads the live `IP_TTL` socket option from the first
+5. **OS detection** (`--os`) — reads the live `IP_TTL` socket option from the first
    open connection (Unix only) and matches it against an embedded fingerprint
    database. **On Windows, or if the measurement fails, this reports
    "unavailable" rather than guessing.**
 
-**`--scan-type`:** only `connect` is implemented. Passing `syn`, `fin`, `null`,
-`xmas`, or `ack` prints an explicit warning and falls back to `connect` — the
-raw-socket probe/capture loop these need isn't wired up yet. This was a deliberate
-choice over silently mislabeling connect-scan results as SYN-scan results.
+**`--scan-type` on Unix with root/CAP_NET_RAW:** `syn` sends a SYN and classifies
+SYN-ACK as open, RST as closed, silence as filtered. `ack` sends a bare ACK to
+distinguish stateful firewalls (silence) from stateless ones (RST = unfiltered).
+`fin`/`null`/`xmas` rely on RFC 793: a compliant open port stays silent, a closed
+one sends RST. **On Windows, these always fall back to `connect`, including
+under Administrator** — Windows has forbidden sending TCP data over raw sockets
+since Vista, which is an OS-level restriction with no privilege level that lifts
+it. SPECTRE detects the failure and warns rather than silently mislabeling
+connect-scan results as SYN-scan results.
 
-**No root/admin needed.** Everything currently implemented uses standard TCP
-connect, so it works without elevated privileges on any OS.
+**`--timing`:** every tier sets the requests/second rate. The stealth tiers
+(`T0`–`T2` / `paranoid`/`sneaky`/`polite`) additionally shuffle the port probe
+order and add a randomized jitter delay before each probe, so there's no fixed
+sequential-sweep or fixed-interval signature. Decoy-IP and packet-fragmentation
+evasion are not implemented.
+
+**Privilege requirements:** `connect`-type confirmation (the default) and
+`--service`/`--os` work without elevation on any OS. `--scan-type syn/fin/null/xmas/ack`
+need root or `CAP_NET_RAW` on Unix (not available at all on Windows). `--udp`
+works unprivileged everywhere, but its `closed` classification (vs. the more
+honest `open|filtered`) needs root/admin on Unix for the ICMP listener.
 
 **Examples:**
 ```bash
 spectre portscan -t 192.168.1.1 --all-ports
 spectre portscan -t example.com -p 80,443,22,8080 --service
 spectre portscan -t 10.0.0.0/24 --top-ports 1000 --os -f json -o scan.json
+spectre portscan -t 8.8.8.8 -p 53,123 --udp                    # UDP probes
+sudo spectre portscan -t 10.0.0.5 -p 1-1000 --scan-type syn     # real SYN scan (Unix)
+spectre portscan -t 10.0.0.5 -p 1-1000 --timing polite          # jittered + shuffled
 ```
 
 ---
@@ -312,24 +345,25 @@ extension, not a working feature yet.
 
 ## Known limitations — honest status
 
-SPECTRE documents what doesn't work yet instead of silently pretending it does.
-As of this writing:
+SPECTRE documents what doesn't work (or only partly works) instead of silently
+pretending it does. As of this writing:
 
 | Feature | Status |
 |---|---|
-| `subdomain --all` | Flag is accepted and logged, but currently behaves the same as running with neither `--passive` nor `--brute`. The coverage maximizers below are not yet triggered by it. |
-| Subdomain permutation / recursive enumeration / Wayback & CommonCrawl archive mining / GitHub & search-engine OSINT (`internal/enrich/*`) | **Implemented as library code but not called from any command.** Not reachable today through the CLI. |
-| `dirfuzz --proxies` | Flag accepted, **not wired into the HTTP client** — requests do not currently route through the proxy file. |
-| `portscan --scan-type syn/fin/null/xmas/ack` | Falls back to `connect` with an explicit warning. The raw-socket craft/send/capture loop (`utils.CraftTCP` exists, but nothing sends or listens for the responses) is not implemented. |
-| `portscan --udp` | Flag accepted, UDP scanning is **not implemented**. |
-| `portscan --timing` (T0–T5) | Only adjusts the requests/second rate. The jitter, decoy-IP, packet-fragmentation, and probe-order-shuffling logic in `internal/evasion/stealth.go` exists as library code but is **not called from the port scanner**. |
+| `subdomain --all` | **Works.** Runs passive+brute, then `internal/enrich`'s coverage maximizers (permutation, bounded recursive permutation, Wayback + CommonCrawl archive mining, GitHub code search, search-engine dorking) on top, resolving and deduplicating every candidate before reporting it. |
+| `dirfuzz --proxies` | **Works.** Routes the dirfuzz HTTP client through the given proxy file (HTTP/SOCKS5), same as `subdomain --proxies`. |
+| `portscan --timing` (T0–T5) | **Works** for rate control on every tier. On stealth tiers (T0–T2 / paranoid/sneaky/polite) it additionally shuffles probe order and adds a randomized per-probe jitter delay (`internal/evasion`), so there's no fixed sequential-sweep or fixed-interval signature. Decoy-IP and packet-fragmentation evasion are still not wired up. |
+| `portscan --udp` | **Works.** Sends protocol-specific probes (DNS, NTP, SNMP) or a generic datagram, classifying `open` on a real response. With root/admin on Unix, it also opens a raw ICMP listener to positively confirm `closed` from a port-unreachable message; without that (the common case, and always on Windows — see below) silence is honestly reported as `open\|filtered` rather than guessed either way, matching Nmap's own documented behavior for the same constraint. |
+| `portscan --scan-type syn/fin/null/xmas/ack` | **Works on Unix with root/CAP_NET_RAW.** Sends the real crafted probe via a raw IP socket and classifies the response per RFC 793 (SYN: SYN-ACK=open, RST=closed; ACK: RST=unfiltered; FIN/NULL/XMAS: RST=closed, silence=open\|filtered). **Does not work on Windows, including under Administrator** — Windows has forbidden sending TCP data over raw sockets since Vista, so `net.ListenIP("ip4:tcp", ...)` always fails there; SPECTRE detects this and falls back to `connect` with an explicit warning rather than silently mislabeling results. One documented side-effect on Unix: the local kernel doesn't recognize our hand-crafted handshake and sends its own RST after we've already read the target's real response — harmless to our classification, but an extra packet a target-side IDS could observe. |
 | `portscan --os` | Real on Unix (reads the live `IP_TTL` socket option and matches against an embedded fingerprint table). On Windows, or whenever the measurement fails, it correctly reports "unavailable" — it does not fabricate a guess. |
-| WAF evasion (`dirfuzz --waf-evasion`) | **This one works** — implemented inline in `internal/dirfuzz` and verified end-to-end. |
+| WAF evasion (`dirfuzz --waf-evasion`) | **Works** — implemented inline in `internal/dirfuzz` and verified end-to-end. |
 
-If you need any of the not-yet-wired items for real work, say so — they're
-either already half-built (enrich, evasion, raw sockets) or need to be built
-from scratch (UDP scanning), and the next pass should focus on actually wiring
-them into the commands rather than adding more surface area.
+If something here still doesn't cover your use case — decoy-IP scanning,
+packet fragmentation, or running raw-socket scan types on Windows — say so;
+decoys/fragmentation are the remaining unbuilt pieces of the evasion layer,
+and the Windows raw-socket gap is an OS restriction with no code-level fix
+(packet-injection drivers like Npcap are the only way around it, and aren't
+wired up).
 
 ---
 

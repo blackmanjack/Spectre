@@ -2,7 +2,9 @@ package subdomain
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"io/fs"
 	"strings"
 	"sync"
 	"time"
@@ -28,9 +30,11 @@ type Options struct {
 	Sources      []string // which passive sources to enable
 	SkipWildcard bool
 	ProxyFile    string
+	GitHubToken  string // optional; used by --all's GitHub code-search enricher
 
-	Writer  output.Writer
-	Catalog *wl.Catalog
+	Writer     output.Writer
+	Catalog    *wl.Catalog
+	EmbeddedFS fs.FS // embedded fallback wordlists; required if Catalog resolution can't find a pulled list
 }
 
 // Summary holds scan statistics.
@@ -110,15 +114,18 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 		}
 
 		// Load wordlist
-		loader := wl.NewResolver(opts.Catalog, nil)
+		loader := wl.NewResolver(opts.Catalog, opts.EmbeddedFS)
 		spec := opts.WordlistSpec
 		if spec == "" {
 			spec = "subdomains.txt"
 		}
 		wordCh, _, err := loader.Resolve(spec)
 		if err != nil {
-			// Fall back to embedded
-			wldr := utils.NewWordlistLoader(nil)
+			// Fall back to the embedded default list directly.
+			if opts.EmbeddedFS == nil {
+				return summary, fmt.Errorf("resolving wordlist %q: %w (no embedded fallback FS provided)", spec, err)
+			}
+			wldr := utils.NewWordlistLoader(opts.EmbeddedFS)
 			wordCh, err = wldr.Load("", "subdomains.txt")
 			if err != nil {
 				return summary, err
@@ -134,6 +141,16 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 			Wildcard:    wc,
 			Seen:        seen,
 		}, out)
+	}
+
+	// --all: run the coverage maximizers (permutation, recursive enumeration,
+	// Wayback/CommonCrawl archive mining, GitHub + search-engine OSINT) on top
+	// of whatever passive+brute already found.
+	if opts.AllModes {
+		RunEnrich(ctx, EnrichOptions{
+			Domain:      opts.Domain,
+			GitHubToken: opts.GitHubToken,
+		}, client, pool, rl, seen, out)
 	}
 
 	summary.Duration = time.Since(start)

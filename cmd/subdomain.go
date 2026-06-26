@@ -38,6 +38,7 @@ var (
 	subSources      string
 	subSkipWildcard bool
 	subProxies      string
+	subGitHubToken  string
 )
 
 func init() {
@@ -49,12 +50,13 @@ func init() {
 	f.Float64VarP(&subRate, "rate", "r", 100, "Requests per second")
 	f.BoolVarP(&subPassive, "passive", "p", false, "Passive sources only (no brute force)")
 	f.BoolVarP(&subBrute, "brute", "b", false, "Brute force only (no passive sources)")
-	f.BoolVar(&subAll, "all", false, "All modes: passive + brute + permute + archive + OSINT")
+	f.BoolVar(&subAll, "all", false, "Run passive+brute, then coverage maximizers: permutation, recursive enumeration, Wayback/CommonCrawl archive mining, GitHub + search-engine OSINT")
 	f.BoolVar(&subFast, "fast", false, "Fast passive-only streaming mode (no resolve, assetfinder-parity)")
 	f.StringVar(&subResolvers, "resolvers", "8.8.8.8:53,1.1.1.1:53,9.9.9.9:53", "DNS resolvers (comma-separated ip:port)")
 	f.StringVar(&subSources, "sources", "", "Passive sources to use (comma-separated: crtsh,hackertarget,alienvault,rapiddns,certspotter)")
 	f.BoolVar(&subSkipWildcard, "skip-wildcard", false, "Skip wildcard DNS detection")
 	f.StringVar(&subProxies, "proxies", "", "Proxy list file for anti-block rotation")
+	f.StringVar(&subGitHubToken, "github-token", "", "GitHub token for --all's code-search enricher (works unauthenticated at a lower rate limit)")
 	_ = subdomainCmd.MarkFlagRequired("domain")
 	rootCmd.AddCommand(subdomainCmd)
 }
@@ -130,8 +132,10 @@ func runSubdomain(cmd *cobra.Command, args []string) error {
 		Resolvers:    parseComma(subResolvers),
 		Sources:      parseComma(subSources),
 		ProxyFile:    subProxies,
+		GitHubToken:  subGitHubToken,
 		Writer:       writer,
 		Catalog:      cat,
+		EmbeddedFS:   embeddedFS,
 	}
 
 	summary, err := subdomain.Run(ctx, opts)

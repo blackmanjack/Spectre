@@ -7,13 +7,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/spectre-tool/spectre/internal/evasion"
 	"github.com/spectre-tool/spectre/internal/utils"
 )
 
 // discoverOpenPorts performs Phase 1: fast TCP connect sweep.
 // Returns a slice of candidate-open ports to pass to Phase 2 for confirmation.
 // Falls back to connect scan if raw sockets unavailable.
-func discoverOpenPorts(ctx context.Context, target string, ports []int, concurrency int, timeout time.Duration, rl *utils.RateLimiter, ac *AdaptiveController) []int {
+//
+// If tmpl is a stealth-tier timing template (T0-T2/paranoid/sneaky/polite),
+// each probe sleeps for a randomized jitter delay before firing, so probe
+// cadence isn't a fixed, easily-fingerprinted interval. Port order is
+// shuffled by the caller before this is invoked.
+func discoverOpenPorts(ctx context.Context, target string, ports []int, concurrency int, timeout time.Duration, rl *utils.RateLimiter, ac *AdaptiveController, tmpl evasion.TimingTemplate, useJitter bool) []int {
 	work := make(chan int, concurrency*2)
 	var mu sync.Mutex
 	var open []int
@@ -44,6 +50,13 @@ func discoverOpenPorts(ctx context.Context, target string, ports []int, concurre
 					}
 					if err := rl.Wait(ctx); err != nil {
 						return
+					}
+					if useJitter {
+						select {
+						case <-time.After(evasion.Jitter(tmpl)):
+						case <-ctx.Done():
+							return
+						}
 					}
 					if connectProbe(ctx, target, port, timeout) {
 						mu.Lock()
