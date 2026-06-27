@@ -5,9 +5,11 @@
 A fast, single-binary reconnaissance suite written in Go, for **authorized security
 testing only** (pentest engagements, bug bounty programs you're enrolled in, CTFs,
 or infrastructure you own). It combines subdomain enumeration, directory fuzzing,
-port scanning, DNS recon, web technology fingerprinting, and full technology-stack
+port scanning, DNS recon, web technology fingerprinting, full technology-stack
 detection (framework/version, hosting/CDN, cloud provider, DB hints, exposed
-CI/CD config) in one tool.
+CI/CD config), FindSomething-style endpoint/secret extraction crawling, and
+static pattern-based vulnerability scanning (DOM XSS, auth bypass, SQLi) in
+one tool.
 
 This README documents what the tool actually does today, including parts that
 are still stubs — see [Known limitations](#known-limitations--honest-status) before
@@ -386,6 +388,133 @@ spectre stack https://example.com --check-metadata -f json -o stack.json
 
 ---
 
+## `spectre crawl` — endpoint/secret extraction crawler
+
+```
+spectre crawl <url> [flags]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--timeout` | 10 | Request timeout (seconds) |
+| `--skip-tls` | off | Skip TLS certificate verification |
+| `-c, --concurrency` | 10 | Concurrent page/asset fetches |
+| `--max-asset-size` | 5 | Per-asset read cap in MB |
+| `--depth` | 2 | Max same-origin link-following depth from the seed page |
+| `--max-pages` | 100 | Hard cap on total pages visited |
+| `--same-origin` | on | Restrict link-following to the seed URL's host |
+| `--headers` | none | Extra headers: `Key:Value,Key2:Value2` |
+| `--cookies` | none | Cookie header value |
+
+Does what the FindSomething/LinkFinder/SecretFinder browser extensions do, run
+from the command line, across an entire same-origin domain instead of one tab:
+
+- **Bounded BFS crawl** — starts at the seed URL, follows same-origin `<a href>`
+  links up to `--depth` hops, capped at `--max-pages` total pages (whichever
+  limit is hit first stops the crawl; in-flight fetches still finish).
+  `--same-origin=false` opts into following links to other domains too (prints
+  a warning, since it changes what's effectively being scanned).
+- **Asset extraction** — every page's `<script src>`, stylesheet `<link href>`,
+  and inline `<script>` bodies are pulled and fetched (concurrently, bounded by
+  `--concurrency`), then scanned alongside the page HTML itself.
+- **Endpoints** — absolute URLs, API-looking paths (`/api`, `/v1`, `/graphql`,
+  `/rest`), and `fetch()`/jQuery-AJAX/`XMLHttpRequest.open()` call arguments,
+  plus a low-confidence generic relative-path fallback. Each finding states
+  it's a discovered reference, not a confirmed-reachable endpoint.
+- **Secrets** — AWS access keys, Google API keys, Stripe keys, Slack tokens,
+  JWT-looking strings, and generic `api_key`/`secret`/`token` assignments.
+  Values are partially masked in output (first 6 + last 4 characters) so
+  SPECTRE's own output never becomes a credential-leak vector — every secret
+  finding states it requires verification before being treated as live.
+- **Source map references** — flags `//# sourceMappingURL=` comments (presence
+  only; SPECTRE does not fetch/parse the map file itself), since a `.map` file
+  can leak original unminified source structure.
+
+**No headless browser / no JS execution:** this is a static HTTP crawl. Routes
+or endpoints that only appear after client-side JavaScript runs (lazy-loaded
+routes, dynamically constructed URLs) will not be found — that's a deliberate
+scope boundary, not a missing feature, to keep SPECTRE dependency-free and
+fast. Findings are deduplicated by value across the whole crawl (the same
+endpoint found via two different JS files is reported once) and by page URL
+for the BFS itself (a page linked from multiple other pages is fetched once).
+
+**Example:**
+```bash
+spectre crawl https://example.com
+spectre crawl https://example.com --depth 3 --max-pages 200
+spectre crawl https://example.com --same-origin=false -f json -o crawl.json
+```
+
+---
+
+## `spectre analyze` — static pattern-based vulnerability scan
+
+```
+spectre analyze <target> [flags]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--timeout` | 10 | Request timeout for URL entries in list mode (seconds) |
+| `--skip-tls` | off | Skip TLS verification (URL entries only) |
+| `-c, --concurrency` | 8 | Concurrent file/URL scans |
+| `--max-file-size` | 10 | Per-file/per-URL read cap in MB |
+| `--categories` | `dom-xss,auth-bypass,sqli` | Comma list of detection categories to enable |
+| `--min-confidence` | 0 | Suppress findings below this confidence |
+
+Scans JS/HTML/ASPX/ASP source for DOM XSS sinks, auth-bypass indicators, and
+SQL-injection-prone patterns — **pattern/proximity-based detection, not
+AST-level taint-flow analysis.** Every finding states it's a heuristic match
+requiring manual verification, never an assertion that a vulnerability is
+confirmed or exploitable. This is the same honesty standard already applied
+throughout SPECTRE (cf. `webtech`/`stack`'s leaked-error-message findings).
+
+`<target>` is auto-detected:
+- **Single file** — scanned directly.
+- **Directory** — recursively walked (`.js`/`.html`/`.htm`/`.aspx`/`.asp`/`.cshtml`),
+  skipping `node_modules`, `.git`, `vendor`, `bin`, `obj`.
+- **`.txt` list file** — one path or URL per line; entries containing `://`
+  are fetched over HTTP, everything else is read from the local filesystem.
+  Useful for feeding `spectre crawl`'s discovered JS files straight into
+  `spectre analyze`.
+
+**Detection categories** (`--categories` to select a subset):
+- **`dom-xss`** — sinks (`innerHTML`/`outerHTML` assignment, `document.write()`,
+  `eval()`, `setTimeout`/`setInterval` with a string callback,
+  `insertAdjacentHTML()`, `location.href`/`replace`/`assign`) reported at
+  confidence ~45 on their own (tier 1), upgraded to ~80 (tier 2) when a
+  tainted-looking source (`location.search`, `location.hash`,
+  `URLSearchParams`, `document.URL`, `window.name`, `document.referrer`,
+  `postMessage`/`onmessage`) appears in the surrounding proximity window.
+- **`auth-bypass`** — hardcoded credential assignments, commented-out auth
+  checks, client-side-only role comparisons (`if (role == "admin")` in JS —
+  a smell since real authorization must happen server-side), ASPX
+  `ValidateRequest="false"` (disables built-in XSS protection), and
+  `[AllowAnonymous]` (elevated confidence when near a sensitive-looking
+  method name like `DeleteUser`/`admin`/`payment`).
+- **`sqli`** — SQL built via string concatenation (`"SELECT ... FROM" + x`,
+  `"WHERE id=" + x`), classic ASP `& Request(...)` adjacent to a SQL keyword,
+  `exec()`/`execute()` with a concatenated argument, and a proximity heuristic
+  (SQL keyword literal near a request-parameter source with a concatenation
+  token and no visible parameterization placeholder — absence of a bind
+  parameter is a signal, not proof).
+
+**Minified JS handling:** files are heuristically flagged as minified (very
+long average line length, or very few lines for their byte size) before
+scanning. For minified files, the tainted-source proximity check falls back
+from a line-count window to a ±200-byte window, and every finding's position
+is reported as a byte offset instead of a line number so a human can still
+locate the match in a single-line blob.
+
+**Example:**
+```bash
+spectre analyze ./app.js
+spectre analyze ./src/ --categories dom-xss,sqli
+spectre analyze targets.txt --min-confidence 60 -f json -o findings.json
+```
+
+---
+
 ## `spectre breach` — breach/leak exposure check
 
 ```
@@ -496,6 +625,20 @@ row stops matching reality, treat that as a bug report against the README.
 | Framework/version detection | Versions are only reported when a page genuinely discloses them (Next.js build ID, WordPress/Angular meta tags, Laravel/Django debug pages, or an exposed `package.json`). A framework's mere presence (e.g. generic React markup) is reported without a guessed version. |
 | Aux-file/CI-CD exposure probes | Guarded by soft-404 calibration (same technique as `dirfuzz`): a random nonexistent path is probed first, and any `.env`/`.git`/`vercel.json`-style hit that matches that catch-all fingerprint is discarded rather than reported as a real exposure. Runs all probes concurrently. |
 | `--check-metadata` | Covers AWS/DigitalOcean/Azure-style `169.254.169.254` and GCP's `metadata.google.internal`/`computeMetadata`. Requires 2+ metadata-specific markers in the response (not a single common word) before reporting, and is also guarded by the soft-404 fingerprint. |
+
+**`crawl`**
+| Feature | Status |
+|---|---|
+| Multi-page BFS | Follows same-origin `<a href>` links up to `--depth` hops, capped by `--max-pages`; visited pages are deduplicated by URL (fragment stripped) so the same page is never fetched twice even if linked from multiple other pages. |
+| Endpoint/secret extraction | Regex-based, not a real HTML/JS parser — unusual markup or heavily obfuscated JS can evade extraction. Findings are deduplicated by value across the entire crawl, not just per-page. Secret values are partially masked in output so SPECTRE's own output can't leak a full credential. |
+| No JS execution | Deliberate scope boundary, not a gap: this is a static HTTP crawl, so endpoints that only appear after client-side JS runs (lazy-loaded routes, dynamically built URLs) are not found. A headless-browser mode would catch these but was intentionally not built, to keep SPECTRE dependency-free. |
+
+**`analyze`**
+| Feature | Status |
+|---|---|
+| DOM XSS / auth-bypass / SQLi detection | Pattern/proximity-based heuristics, not AST-level taint-flow analysis. Every finding's `Extra` field states it's a heuristic match requiring manual verification — SPECTRE never asserts a vulnerability is confirmed or exploitable from a regex match alone. |
+| Minified JS handling | Heuristically detected (long average line length, or few lines for the byte size); detected files fall back from line-based to byte-offset-based proximity windows, with position always reported so a match can still be located in a single-line blob. |
+| Directory walk skip-list | Skips `node_modules`, `.git`, `vendor`, `bin`, `obj` by directory name — verified end-to-end (a planted finding inside `node_modules` does not appear in output). |
 
 **`subdomain` / `dirfuzz`**
 | Feature | Status |

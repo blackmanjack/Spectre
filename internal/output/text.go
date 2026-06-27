@@ -90,6 +90,16 @@ func (w *TextWriter) formatPlain(r Result) string {
 			extra = " — " + r.Extra
 		}
 		return fmt.Sprintf("[%s] %s%s%s%s", r.Source, r.Value, ver, conf, extra)
+	case TypeCrawl, TypeAnalyze:
+		conf := ""
+		if r.Confidence > 0 {
+			conf = fmt.Sprintf(" (confidence:%d%%)", r.Confidence)
+		}
+		extra := ""
+		if r.Extra != "" {
+			extra = " — " + r.Extra
+		}
+		return fmt.Sprintf("[%s] %s%s%s", r.Source, r.Value, conf, extra)
 	default:
 		return fmt.Sprintf("[%s] %s", r.Type, r.Value)
 	}
@@ -162,6 +172,19 @@ func (w *TextWriter) formatColor(r Result) string {
 			extra = colorDim + " — " + r.Extra + colorReset
 		}
 		return fmt.Sprintf("%s %s%s%s%s", src, val, ver, conf, extra)
+
+	case TypeCrawl, TypeAnalyze:
+		src := colorBlue + "[" + r.Source + "]" + colorReset
+		val := colorGreen + colorBold + r.Value + colorReset
+		conf := ""
+		if r.Confidence > 0 {
+			conf = colorDim + fmt.Sprintf(" (confidence:%d%%)", r.Confidence) + colorReset
+		}
+		extra := ""
+		if r.Extra != "" {
+			extra = colorDim + " — " + r.Extra + colorReset
+		}
+		return fmt.Sprintf("%s %s%s%s", src, val, conf, extra)
 
 	default:
 		return fmt.Sprintf("[%s] %s", r.Type, r.Value)

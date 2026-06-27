@@ -9,8 +9,6 @@ require (
 	golang.org/x/sys v0.18.0
 	// Official Go rate limiter (token bucket)
 	golang.org/x/time v0.5.0
-	// Official Go HTML5 tokenizer — filehunt crawl-phase link/script/comment extraction
-	golang.org/x/net v0.21.0
 )
 
 require (

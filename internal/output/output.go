@@ -16,6 +16,8 @@ const (
 	TypeWebTech   ResultType = "webtech"
 	TypeBreach    ResultType = "breach"
 	TypeStack     ResultType = "stack"
+	TypeCrawl     ResultType = "crawl"
+	TypeAnalyze   ResultType = "analyze"
 )
 
 // Result is the unified result type for all modules.
