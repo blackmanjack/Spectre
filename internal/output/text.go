@@ -76,6 +76,20 @@ func (w *TextWriter) formatPlain(r Result) string {
 		return fmt.Sprintf("[webtech] %s%s", r.Value, extra)
 	case TypeBreach:
 		return fmt.Sprintf("[%s] %s — %s", r.Source, r.Value, r.Extra)
+	case TypeStack:
+		ver := ""
+		if r.Version != "" {
+			ver = " v" + r.Version
+		}
+		conf := ""
+		if r.Confidence > 0 {
+			conf = fmt.Sprintf(" (confidence:%d%%)", r.Confidence)
+		}
+		extra := ""
+		if r.Extra != "" {
+			extra = " — " + r.Extra
+		}
+		return fmt.Sprintf("[%s] %s%s%s%s", r.Source, r.Value, ver, conf, extra)
 	default:
 		return fmt.Sprintf("[%s] %s", r.Type, r.Value)
 	}
@@ -131,6 +145,23 @@ func (w *TextWriter) formatColor(r Result) string {
 		src := colorRed + colorBold + "[" + r.Source + "]" + colorReset
 		val := colorYellow + r.Value + colorReset
 		return fmt.Sprintf("%s %s %s%s%s", src, val, colorDim, r.Extra, colorReset)
+
+	case TypeStack:
+		src := colorBlue + "[" + r.Source + "]" + colorReset
+		val := colorGreen + colorBold + r.Value + colorReset
+		ver := ""
+		if r.Version != "" {
+			ver = colorYellow + " v" + r.Version + colorReset
+		}
+		conf := ""
+		if r.Confidence > 0 {
+			conf = colorDim + fmt.Sprintf(" (confidence:%d%%)", r.Confidence) + colorReset
+		}
+		extra := ""
+		if r.Extra != "" {
+			extra = colorDim + " — " + r.Extra + colorReset
+		}
+		return fmt.Sprintf("%s %s%s%s%s", src, val, ver, conf, extra)
 
 	default:
 		return fmt.Sprintf("[%s] %s", r.Type, r.Value)

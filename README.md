@@ -5,7 +5,9 @@
 A fast, single-binary reconnaissance suite written in Go, for **authorized security
 testing only** (pentest engagements, bug bounty programs you're enrolled in, CTFs,
 or infrastructure you own). It combines subdomain enumeration, directory fuzzing,
-port scanning, DNS recon, and web technology fingerprinting in one tool.
+port scanning, DNS recon, web technology fingerprinting, and full technology-stack
+detection (framework/version, hosting/CDN, cloud provider, DB hints, exposed
+CI/CD config) in one tool.
 
 This README documents what the tool actually does today, including parts that
 are still stubs — see [Known limitations](#known-limitations--honest-status) before
@@ -184,6 +186,9 @@ spectre portscan -t <target> [flags]
 | `--retry` | 2 | Retries per port during Phase 2 confirmation |
 | `--adaptive` | on | Adaptive rate backoff on timeouts/ICMP storms |
 | `--timing` | `T4` | `T0`–`T5` (paranoid→insane) or named: `paranoid,sneaky,polite,normal,aggressive,insane` — see note below |
+| `--decoys` | — | Spoofed source IPs to interleave with the real probe, e.g. `"10.0.0.1,10.0.0.2,ME"` (`ME` = real outbound IP). Requires a raw `--scan-type` — see below |
+| `--fragment` | off | Split the crafted TCP header across two IP fragments to defeat stateless IDS/IPS signature matching. Requires a raw `--scan-type` |
+| `--mtu` | 8 | Bytes of TCP header in the first IP fragment when `--fragment` is set (must be a multiple of 8; minimum 8) |
 
 **Scan pipeline (what actually runs today):**
 1. **Discovery** — fast concurrent TCP-connect sweep across the requested ports,
@@ -217,14 +222,30 @@ connect-scan results as SYN-scan results.
 **`--timing`:** every tier sets the requests/second rate. The stealth tiers
 (`T0`–`T2` / `paranoid`/`sneaky`/`polite`) additionally shuffle the port probe
 order and add a randomized jitter delay before each probe, so there's no fixed
-sequential-sweep or fixed-interval signature. Decoy-IP and packet-fragmentation
-evasion are not implemented.
+sequential-sweep or fixed-interval signature.
+
+**`--decoys` and `--fragment` (Unix, raw `--scan-type` only):** both require a
+raw IP socket — they only take effect with `--scan-type syn/fin/null/xmas/ack`
+and root/`CAP_NET_RAW`. With `--scan-type connect` (the default), or without
+raw-socket privilege, SPECTRE prints an explicit `[warn]` and skips them rather
+than silently ignoring the flag.
+- `--decoys "ip1,ip2,ME"` fires a spoofed-source-IP copy of the probe from each
+  listed IP (shuffled order, fire-and-forget, source IP set via a second raw
+  socket bound to protocol 255 since the kernel overwrites the source address
+  on normal `IPPROTO_TCP` raw sends). `ME` substitutes the scanner's real
+  outbound IP so it isn't trivially the odd one out.
+- `--fragment` splits the crafted TCP header into two IP fragments (offsets
+  aligned to RFC 791's 8-byte unit) so a stateless IDS/IPS that only inspects
+  the first fragment never sees the TCP flags byte. `--mtu` controls the split
+  point; if too small or too large to leave both fragments non-empty,
+  SPECTRE falls back to an unfragmented probe.
 
 **Privilege requirements:** `connect`-type confirmation (the default) and
 `--service`/`--os` work without elevation on any OS. `--scan-type syn/fin/null/xmas/ack`
-need root or `CAP_NET_RAW` on Unix (not available at all on Windows). `--udp`
-works unprivileged everywhere, but its `closed` classification (vs. the more
-honest `open|filtered`) needs root/admin on Unix for the ICMP listener.
+(and therefore `--decoys`/`--fragment`) need root or `CAP_NET_RAW` on Unix (not
+available at all on Windows). `--udp` works unprivileged everywhere, but its
+`closed` classification (vs. the more honest `open|filtered`) needs root/admin
+on Unix for the ICMP listener.
 
 **Examples:**
 ```bash
@@ -234,6 +255,7 @@ spectre portscan -t 10.0.0.0/24 --top-ports 1000 --os -f json -o scan.json
 spectre portscan -t 8.8.8.8 -p 53,123 --udp                    # UDP probes
 sudo spectre portscan -t 10.0.0.5 -p 1-1000 --scan-type syn     # real SYN scan (Unix)
 spectre portscan -t 10.0.0.5 -p 1-1000 --timing polite          # jittered + shuffled
+sudo spectre portscan -t 10.0.0.5 --scan-type syn --decoys "10.0.0.9,ME" --fragment
 ```
 
 ---
@@ -289,6 +311,77 @@ Reports, in one pass:
 **Example:**
 ```bash
 spectre webtech https://example.com
+```
+
+---
+
+## `spectre stack` — technology stack detection
+
+```
+spectre stack <url> [flags]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--timeout` | 10 | Request timeout (seconds) |
+| `--skip-tls` | off | Skip TLS certificate verification |
+| `--check-metadata` | off | Also probe for misconfigured cloud-metadata SSRF exposure (active test against a specific misconfiguration class — authorized targets only) |
+
+Goes beyond `webtech`'s header/body fingerprinting to identify the deployed
+stack as concretely as a blackbox client can see it:
+
+- **Framework + version** — Next.js (build ID, `__NEXT_DATA__`), Nuxt.js,
+  WordPress (meta generator tag), Angular (`ng-version`), and any framework
+  whose exact version leaks through a debug/error page (Laravel, Django).
+  Where only the framework's presence (not version) is verifiable from the
+  page itself, version is left blank rather than guessed.
+- **Hosting / CDN / deployment platform** — Vercel, Netlify, Cloudflare,
+  AWS CloudFront, GitHub Pages, Render, Railway, Fly.io, Heroku, Pantheon,
+  Fastly — all from response headers a normal client receives.
+- **Cloud provider hints** — AWS / Azure / Google Cloud, from response
+  headers and, separately, from the TLS certificate issuer.
+- **Database hints** — MySQL/PostgreSQL/MongoDB/Redis/Oracle/MSSQL/SQLite
+  signatures in leaked error output (same honesty rule as `webtech`: only
+  reported if the page actually exposed it).
+- **Exposed CI/CD and deployment config** — probes for `.git/HEAD`,
+  `.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile`, `.travis.yml`,
+  `vercel.json`, `netlify.toml`, `.env`, `docker-compose.yml`, and
+  `package.json` (parsed for exact pinned versions of `next`, `react`,
+  `vue`, `nuxt`, `@angular/core`, `express`, etc. when present). Each is a
+  single GET to a well-known path — finding one is a misconfiguration
+  worth reporting, not an exploit.
+
+**`--check-metadata`:** sends a handful of requests that would only return
+instance-metadata-shaped content if the target has a reverse proxy or
+endpoint that forwards attacker-controlled URLs/hosts to a cloud metadata
+service — AWS/DigitalOcean/Azure-style `169.254.169.254` and GCP's
+`metadata.google.internal`/`computeMetadata`. A hit requires at least two
+metadata-specific markers (`ami-id`, `iam/security-credentials`,
+`computeMetadata`, `Metadata-Flavor`, etc.) together, not just one common
+word, to avoid false positives. This is an active probe for one specific
+SSRF misconfiguration class, not exploitation — off by default, and only
+meant for targets you're authorized to test.
+
+**Soft-404 calibration:** before probing `.env`, `.git/HEAD`,
+`vercel.json`, and the other well-known paths, a random nonexistent path is
+requested first. If the server returns a non-404 (common on SPA/catch-all
+routing — most Next.js/Vue/React sites), that response's body and size
+become a fingerprint, and any aux-file probe that matches it is discarded
+as the catch-all page rather than reported as a real exposure. The same
+fingerprint also guards the `--check-metadata` probes.
+
+**Honesty notes:** every finding here is something a normal HTTP/TLS client
+also sees — no auth bypass, no credential use, no exploitation. Versions are
+only reported when the page itself discloses them (build manifests, debug
+output, or an exposed `package.json`); SPECTRE does not guess a version from
+a framework's mere presence. Aux-file/CI-CD probes run concurrently and are
+guarded by soft-404 calibration so an SPA's catch-all page can't be mistaken
+for an exposed config file.
+
+**Example:**
+```bash
+spectre stack https://example.com
+spectre stack https://example.com --check-metadata -f json -o stack.json
 ```
 
 ---
@@ -391,28 +484,49 @@ extension, not a working feature yet.
 
 ## Known limitations — honest status
 
-SPECTRE documents what doesn't work (or only partly works) instead of silently
-pretending it does. As of this writing:
+Every feature below is implemented and working. This table exists because
+"works" can still mean "works within a platform or protocol constraint" —
+SPECTRE documents those constraints explicitly instead of staying silent
+about them. Re-verified against the current code as of this writing; if any
+row stops matching reality, treat that as a bug report against the README.
 
+**`stack`**
 | Feature | Status |
 |---|---|
-| `subdomain --all` | **Works.** Runs passive+brute, then `internal/enrich`'s coverage maximizers (permutation, bounded recursive permutation, Wayback + CommonCrawl archive mining, GitHub code search, search-engine dorking) on top, resolving and deduplicating every candidate before reporting it. |
-| `dirfuzz --proxies` | **Works.** Routes the dirfuzz HTTP client through the given proxy file (HTTP/SOCKS5), same as `subdomain --proxies`. |
-| `portscan --timing` (T0–T5) | **Works** for rate control on every tier. On stealth tiers (T0–T2 / paranoid/sneaky/polite) it additionally shuffles probe order and adds a randomized per-probe jitter delay (`internal/evasion`), so there's no fixed sequential-sweep or fixed-interval signature. Decoy-IP and packet-fragmentation evasion are still not wired up. |
-| `portscan --udp` | **Works.** Sends protocol-specific probes (DNS, NTP, SNMP) or a generic datagram, classifying `open` on a real response. With root/admin on Unix, it also opens a raw ICMP listener to positively confirm `closed` from a port-unreachable message; without that (the common case, and always on Windows — see below) silence is honestly reported as `open\|filtered` rather than guessed either way, matching Nmap's own documented behavior for the same constraint. |
-| `portscan --scan-type syn/fin/null/xmas/ack` | **Works on Unix with root/CAP_NET_RAW.** Sends the real crafted probe via a raw IP socket and classifies the response per RFC 793 (SYN: SYN-ACK=open, RST=closed; ACK: RST=unfiltered; FIN/NULL/XMAS: RST=closed, silence=open\|filtered). **Does not work on Windows, including under Administrator** — Windows has forbidden sending TCP data over raw sockets since Vista, so `net.ListenIP("ip4:tcp", ...)` always fails there; SPECTRE detects this and falls back to `connect` with an explicit warning rather than silently mislabeling results. One documented side-effect on Unix: the local kernel doesn't recognize our hand-crafted handshake and sends its own RST after we've already read the target's real response — harmless to our classification, but an extra packet a target-side IDS could observe. |
-| `portscan --os` | Real on Unix (reads the live `IP_TTL` socket option and matches against an embedded fingerprint table). On Windows, or whenever the measurement fails, it correctly reports "unavailable" — it does not fabricate a guess. |
-| WAF evasion (`dirfuzz --waf-evasion`) | **Works** — implemented inline in `internal/dirfuzz` and verified end-to-end. |
-| `breach` (paste-sites) | **Works**, with an honest ceiling: Pastebin's free scrape endpoint only covers the last ~30 minutes of public pastes and is IP-whitelisted (unwhitelisted IPs see HTTP 403, reported as a skip, not a false "clean" result). |
-| `breach` (HIBP/DeHashed) | **Works** once you supply your own API key/account — see `spectre breach`. No keys are bundled; without one, that provider is explicitly skipped rather than silently omitted. |
-| Dark-web (Tor/`.onion`) access | **Not implemented, by design.** `spectre breach` covers clear-web breach/leak exposure (paste sites + bring-your-own breach-database APIs), which is where the legally and practically useful signal lives. Actual `.onion` crawling is a different protocol/threat model and is out of scope for this tool. |
+| Framework/version detection | Versions are only reported when a page genuinely discloses them (Next.js build ID, WordPress/Angular meta tags, Laravel/Django debug pages, or an exposed `package.json`). A framework's mere presence (e.g. generic React markup) is reported without a guessed version. |
+| Aux-file/CI-CD exposure probes | Guarded by soft-404 calibration (same technique as `dirfuzz`): a random nonexistent path is probed first, and any `.env`/`.git`/`vercel.json`-style hit that matches that catch-all fingerprint is discarded rather than reported as a real exposure. Runs all probes concurrently. |
+| `--check-metadata` | Covers AWS/DigitalOcean/Azure-style `169.254.169.254` and GCP's `metadata.google.internal`/`computeMetadata`. Requires 2+ metadata-specific markers in the response (not a single common word) before reporting, and is also guarded by the soft-404 fingerprint. |
 
-If something here still doesn't cover your use case — decoy-IP scanning,
-packet fragmentation, or running raw-socket scan types on Windows — say so;
-decoys/fragmentation are the remaining unbuilt pieces of the evasion layer,
-and the Windows raw-socket gap is an OS restriction with no code-level fix
-(packet-injection drivers like Npcap are the only way around it, and aren't
-wired up).
+**`subdomain` / `dirfuzz`**
+| Feature | Status |
+|---|---|
+| `subdomain --all` | Runs passive+brute, then `internal/enrich`'s coverage maximizers (permutation, bounded recursive permutation, Wayback + CommonCrawl archive mining, GitHub code search, search-engine dorking) on top, resolving and deduplicating every candidate before reporting it. |
+| `dirfuzz --proxies` | Routes the dirfuzz HTTP client through the given proxy file (HTTP/SOCKS5), same as `subdomain --proxies`. |
+| `dirfuzz --waf-evasion` | Expands each path into `internal/evasion`'s encoding/case/separator mutations and adds its 15-header WAF-bypass set — implemented and wired into the request loop, not cosmetic. |
+
+**`portscan`**
+| Feature | Status |
+|---|---|
+| `--timing` (T0–T5) | Controls rate on every tier. Stealth tiers (T0–T2 / paranoid/sneaky/polite) additionally shuffle probe order and add a randomized per-probe jitter delay (`internal/evasion`), so there's no fixed sequential-sweep or fixed-interval signature. |
+| `--decoys` | **Unix with root/CAP_NET_RAW only** (requires a raw `--scan-type`). Fires a shuffled, fire-and-forget spoofed-source-IP copy of each probe via a second raw socket bound to protocol 255 (needed because the kernel overwrites the source address on a normal `IPPROTO_TCP` raw send). Without raw-socket privilege, prints an explicit warning and skips decoys rather than silently dropping the flag. |
+| `--fragment` | **Unix with root/CAP_NET_RAW only** (requires a raw `--scan-type`). Splits the crafted TCP header into two IP fragments aligned to RFC 791's 8-byte offset unit, via `--mtu`. Falls back to an unfragmented probe if the requested MTU would leave either fragment empty. |
+| `--udp` | Sends protocol-specific probes (DNS, NTP, SNMP) or a generic datagram, classifying `open` on a real response. With root/admin on Unix, also opens a raw ICMP listener to positively confirm `closed`; without that (the common case, and always on Windows) silence is honestly reported as `open\|filtered`, matching Nmap's own documented behavior for the same constraint. |
+| `--scan-type syn/fin/null/xmas/ack` | **Works on Unix with root/CAP_NET_RAW.** Sends the real crafted probe via a raw IP socket and classifies per RFC 793. **Does not work on Windows, including under Administrator** — Windows has forbidden sending TCP data over raw sockets since Vista, so `net.ListenIP("ip4:tcp", ...)` always fails there; SPECTRE detects this and falls back to `connect` with an explicit warning rather than silently mislabeling results. |
+| `--os` | Real on Unix (reads the live `IP_TTL` socket option and matches an embedded fingerprint table). On Windows, or whenever the measurement fails, it reports "unavailable" rather than fabricating a guess. |
+
+**`breach`**
+| Feature | Status |
+|---|---|
+| Paste-sites | Pastebin's free scrape endpoint only covers the last ~30 minutes of public pastes and is IP-whitelisted (unwhitelisted IPs see HTTP 403, reported as a skip, not a false "clean" result). |
+| HIBP / DeHashed | Bring your own API key/account — see `spectre breach`. No keys are bundled; without one, that provider is explicitly skipped rather than silently omitted. |
+| Dark-web (Tor/`.onion`) | **Not implemented, by design.** `spectre breach` covers clear-web breach/leak exposure, which is where the legally and practically useful signal lives. `.onion` crawling is a different protocol/threat model and is out of scope. |
+
+**The only hard, unfixable-in-code gap:** raw-socket scan types (and
+therefore `--decoys`/`--fragment`) on **Windows**, including under
+Administrator. Windows has forbidden sending TCP data over raw sockets
+since Vista — an OS-level restriction with no privilege level that lifts
+it. A packet-injection driver (Npcap) is the only way around it, and isn't
+wired up. If something else here doesn't cover your use case, say so.
 
 ---
 

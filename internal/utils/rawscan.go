@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"net"
 	"sync"
@@ -47,8 +48,9 @@ type RawProbeResult struct {
 // error from NewRawScanner since privilege alone doesn't guarantee the
 // platform supports this (Windows being the standing example).
 type RawScanner struct {
-	conn  *net.IPConn
-	srcIP net.IP
+	conn      *net.IPConn // tcp-protocol raw socket for sending+receiving probes
+	spoofConn *net.IPConn // raw IP socket (protocol 255) for spoofed/fragmented sends
+	srcIP     net.IP
 
 	mu      sync.Mutex
 	waiters map[uint16]chan RawProbeResult
@@ -58,22 +60,44 @@ type RawScanner struct {
 // directly (bypassing the kernel's TCP state machine, which is what lets us
 // send SYN/FIN/NULL/XMAS probes without completing a real handshake).
 // Returns an error on Windows unconditionally — see the RawScanner doc above.
+//
+// spoofConn is a separate raw socket bound to an unused protocol number (255)
+// so we can write full IP datagrams (including custom source IPs and fragment
+// fields) rather than just TCP payloads. This is needed for:
+//   - Decoy scanning (spoofed source IP)
+//   - Packet fragmentation (custom IP fragment offset/MF fields)
 func NewRawScanner(srcIP net.IP) (*RawScanner, error) {
 	conn, err := net.ListenIP("ip4:tcp", &net.IPAddr{IP: net.IPv4zero})
 	if err != nil {
 		return nil, err
 	}
+	spoofConn, err := net.ListenIP("ip4:255", &net.IPAddr{IP: net.IPv4zero})
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
 	rs := &RawScanner{
-		conn:    conn,
-		srcIP:   srcIP,
-		waiters: make(map[uint16]chan RawProbeResult),
+		conn:      conn,
+		spoofConn: spoofConn,
+		srcIP:     srcIP,
+		waiters:   make(map[uint16]chan RawProbeResult),
 	}
 	return rs, nil
 }
 
-// Close releases the underlying raw socket.
+// Close releases the underlying raw sockets.
 func (rs *RawScanner) Close() error {
-	return rs.conn.Close()
+	var err1, err2 error
+	if rs.conn != nil {
+		err1 = rs.conn.Close()
+	}
+	if rs.spoofConn != nil {
+		err2 = rs.spoofConn.Close()
+	}
+	if err1 != nil {
+		return err1
+	}
+	return err2
 }
 
 // Listen reads incoming TCP segments until ctx is cancelled, dispatching each
@@ -142,6 +166,114 @@ func (rs *RawScanner) Probe(ctx context.Context, dstIP net.IP, dstPort int, flag
 	tcpOnly := pkt[20:]
 
 	if _, err := rs.conn.WriteToIP(tcpOnly, &net.IPAddr{IP: dstIP}); err != nil {
+		return RawProbeResult{}, err
+	}
+
+	select {
+	case r := <-ch:
+		return r, nil
+	case <-time.After(timeout):
+		return RawProbeResult{GotResponse: false}, nil
+	case <-ctx.Done():
+		return RawProbeResult{}, ctx.Err()
+	}
+}
+
+// SendSpoofedTCP sends a single spoofed TCP packet using the given spoofed
+// srcIP as the apparent source. This is fire-and-forget: no response is read
+// or correlated, so it is suitable for decoy scanning where the goal is only
+// to create noise that obscures the true scanner IP.
+//
+// The full datagram (IP+TCP) is written to spoofConn (protocol 255) so we
+// control the IP source address, which the normal tcp-protocol socket does not
+// allow on Linux (the kernel overwrites it with the outbound interface address).
+func (rs *RawScanner) SendSpoofedTCP(dstIP, srcIP net.IP, dstPort int, flags uint8) error {
+	// Validate srcIP is IPv4 before crafting — To4() returning nil would cause
+	// a nil-dereference inside CraftTCP.
+	if srcIP.To4() == nil {
+		return nil // silently skip non-IPv4 decoys
+	}
+	srcPort := RandomPort()
+	pkt := CraftTCP(TCPPacket{
+		SrcIP:   srcIP,
+		DstIP:   dstIP,
+		SrcPort: srcPort,
+		DstPort: uint16(dstPort),
+		Flags:   flags,
+	})
+	_, err := rs.spoofConn.WriteToIP(pkt, &net.IPAddr{IP: dstIP})
+	return err
+}
+
+// ProbeFragmented sends a TCP probe split across two IP fragments and waits
+// for a correlated response. This causes stateless IDS/IPS signature matchers
+// that only inspect the first fragment to miss the TCP flags field.
+//
+// mtu specifies how many bytes of the TCP header to place in the first
+// fragment. It is automatically:
+//   - Aligned down to the nearest multiple of 8 (RFC 791 requires offsets in
+//     8-byte units; misalignment produces overlapping or gapped fragments that
+//     modern kernels silently discard).
+//   - Clamped to [8, len(tcpHeader)-8] so both fragments are non-empty and the
+//     second fragment actually contains the flags byte (offset 13).
+//
+// If the resulting aligned mtu would leave an empty second fragment, the probe
+// falls back to an unfragmented Probe() call.
+func (rs *RawScanner) ProbeFragmented(ctx context.Context, dstIP net.IP, dstPort int, flags uint8, timeout time.Duration, mtu int) (RawProbeResult, error) {
+	srcPort := RandomPort()
+
+	ch := make(chan RawProbeResult, 1)
+	rs.mu.Lock()
+	rs.waiters[srcPort] = ch
+	rs.mu.Unlock()
+	defer func() {
+		rs.mu.Lock()
+		delete(rs.waiters, srcPort)
+		rs.mu.Unlock()
+	}()
+
+	pkt := CraftTCP(TCPPacket{
+		SrcIP:   rs.srcIP,
+		DstIP:   dstIP,
+		SrcPort: srcPort,
+		DstPort: uint16(dstPort),
+		Flags:   flags,
+	})
+	tcpOnly := pkt[20:] // 20-byte TCP header
+
+	// Align mtu down to nearest multiple of 8 (IP fragment offset unit).
+	mtu = (mtu / 8) * 8
+	if mtu < 8 {
+		mtu = 8
+	}
+	// Ensure second fragment is non-empty.
+	if mtu >= len(tcpOnly) {
+		mtu = len(tcpOnly) - 8
+	}
+	if mtu < 8 {
+		// TCP header too short to split meaningfully; fall back to plain probe.
+		return rs.Probe(ctx, dstIP, dstPort, flags, timeout)
+	}
+
+	// Use crypto/rand for fragment ID so IDS cannot correlate fragment pairs
+	// across different probes by tracking sequential ID values.
+	var idBuf [2]byte
+	if _, err := rand.Read(idBuf[:]); err != nil {
+		return RawProbeResult{}, err
+	}
+	id := binary.BigEndian.Uint16(idBuf[:])
+
+	payload1 := tcpOnly[:mtu]
+	payload2 := tcpOnly[mtu:]
+
+	frag1 := CraftIPFragment(rs.srcIP, dstIP, id, true, 0, payload1)
+	// offset for frag2 in 8-byte units
+	frag2 := CraftIPFragment(rs.srcIP, dstIP, id, false, uint16(mtu/8), payload2)
+
+	if _, err := rs.spoofConn.WriteToIP(frag1, &net.IPAddr{IP: dstIP}); err != nil {
+		return RawProbeResult{}, err
+	}
+	if _, err := rs.spoofConn.WriteToIP(frag2, &net.IPAddr{IP: dstIP}); err != nil {
 		return RawProbeResult{}, err
 	}
 

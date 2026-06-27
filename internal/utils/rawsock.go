@@ -1,8 +1,8 @@
 package utils
 
 import (
+	"crypto/rand"
 	"encoding/binary"
-	"math/rand"
 	"net"
 )
 
@@ -33,14 +33,38 @@ type TCPPacket struct {
 	Window  uint16
 }
 
+// cryptoUint32 returns a cryptographically random uint32.
+// Falls back to 0 on failure (extremely unlikely; callers treat 0 as
+// "generate random" in SeqNum, so a failure simply triggers re-generation
+// from the same source, which will also fail — acceptable edge case).
+func cryptoUint32() uint32 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[:])
+}
+
+// cryptoUint16 returns a cryptographically random uint16.
+func cryptoUint16() uint16 {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 10000 // safe fallback
+	}
+	return binary.BigEndian.Uint16(b[:])
+}
+
 // CraftTCP builds a raw TCP+IP packet. Returns the full IP datagram as bytes.
 // Only IPv4 is supported. Suitable for writing to a raw SOCK_RAW socket.
+// SeqNum and IP ID are generated with crypto/rand so they are unpredictable
+// and cannot be fingerprinted or used to correlate/disrupt the scan via RST
+// injection.
 func CraftTCP(pkt TCPPacket) []byte {
 	if pkt.Window == 0 {
 		pkt.Window = 65535
 	}
 	if pkt.SeqNum == 0 {
-		pkt.SeqNum = rand.Uint32()
+		pkt.SeqNum = cryptoUint32()
 	}
 
 	// TCP header (20 bytes, no options)
@@ -66,11 +90,13 @@ func CraftTCP(pkt TCPPacket) []byte {
 	ip[1] = 0x00 // DSCP/ECN
 	totalLen := uint16(40)
 	binary.BigEndian.PutUint16(ip[2:], totalLen)
-	binary.BigEndian.PutUint16(ip[4:], uint16(rand.Uint32())) // ID
-	binary.BigEndian.PutUint16(ip[6:], 0x4000)                // DF flag
-	ip[8] = 64                                                 // TTL
-	ip[9] = 6                                                  // protocol TCP
-	binary.BigEndian.PutUint16(ip[10:], 0)                    // checksum placeholder
+	// Use crypto/rand for IP ID to prevent ID-based OS fingerprinting and
+	// RST injection attacks that rely on predictable ID sequences.
+	binary.BigEndian.PutUint16(ip[4:], cryptoUint16())
+	binary.BigEndian.PutUint16(ip[6:], 0x4000) // DF flag
+	ip[8] = 64                                  // TTL
+	ip[9] = 6                                   // protocol TCP
+	binary.BigEndian.PutUint16(ip[10:], 0)      // checksum placeholder
 	copy(ip[12:], pkt.SrcIP.To4())
 	copy(ip[16:], pkt.DstIP.To4())
 	ipCS := ipChecksum(ip)
@@ -79,9 +105,53 @@ func CraftTCP(pkt TCPPacket) []byte {
 	return append(ip, tcp...)
 }
 
-// RandomPort returns a random high-numbered source port.
+// RandomPort returns a cryptographically random high-numbered source port
+// (10000–65535). Unpredictable source ports prevent fixed-source-port
+// signatures and reduce the risk of RST injection against known ports.
 func RandomPort() uint16 {
-	return uint16(rand.Intn(55535) + 10000)
+	// Range [10000, 65535] = 55536 values
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 32768 // safe static fallback
+	}
+	v := binary.BigEndian.Uint16(b[:])
+	return 10000 + (v % 55536)
+}
+
+// CraftIPFragment builds an IPv4 datagram with explicit fragment fields.
+// Used to split a TCP probe across two IP fragments so that stateless IDS/IPS
+// signature matching (which only inspects the first fragment) misses the TCP
+// flags field.
+//
+//   - id:      IP Identification field — same value across both fragments
+//     (use crypto/rand so pairs cannot be trivially correlated externally).
+//   - mf:      "More Fragments" bit; true for all but the last fragment.
+//   - offset:  Fragment offset in units of 8 bytes (RFC 791 §3.1).
+//   - payload: Raw bytes that follow the IP header in this fragment.
+func CraftIPFragment(srcIP, dstIP net.IP, id uint16, mf bool, offset uint16, payload []byte) []byte {
+	ip := make([]byte, 20)
+	ip[0] = 0x45 // version=4, IHL=5
+	ip[1] = 0x00 // DSCP/ECN
+	totalLen := uint16(20 + len(payload))
+	binary.BigEndian.PutUint16(ip[2:], totalLen)
+	binary.BigEndian.PutUint16(ip[4:], id)
+
+	var flagsAndOffset uint16
+	if mf {
+		flagsAndOffset |= 0x2000 // MF bit (bit 13 of flags+offset field)
+	}
+	flagsAndOffset |= offset & 0x1FFF // low 13 bits are the offset
+	binary.BigEndian.PutUint16(ip[6:], flagsAndOffset)
+
+	ip[8] = 64 // TTL
+	ip[9] = 6  // protocol TCP
+	binary.BigEndian.PutUint16(ip[10:], 0) // checksum placeholder
+	copy(ip[12:], srcIP.To4())
+	copy(ip[16:], dstIP.To4())
+	ipCS := ipChecksum(ip)
+	binary.BigEndian.PutUint16(ip[10:], ipCS)
+
+	return append(ip, payload...)
 }
 
 func ipChecksum(header []byte) uint16 {

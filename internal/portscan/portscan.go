@@ -76,24 +76,53 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 	// — never silently relabel a connect-scan result as if it came from SYN.
 	rawOnlyTypes := map[string]bool{"syn": true, "fin": true, "null": true, "xmas": true, "ack": true}
 	var rawScanner *utils.RawScanner
+	var srcIP net.IP // outbound source IP; also used for "ME" decoy substitution
 	if rawOnlyTypes[opts.ScanType] {
 		if !utils.RawSockAvailable {
 			fmt.Fprintf(os.Stderr, "[warn] Raw socket unavailable (no root/admin) for --scan-type=%s — using TCP connect scan\n", opts.ScanType)
 			opts.ScanType = "connect"
-		} else if srcIP := outboundIP(opts.Target); srcIP == nil {
-			fmt.Fprintf(os.Stderr, "[warn] Could not determine outbound source IP for --scan-type=%s — using TCP connect scan\n", opts.ScanType)
-			opts.ScanType = "connect"
 		} else {
-			var err error
-			rawScanner, err = utils.NewRawScanner(srcIP)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[warn] Failed to open raw socket for --scan-type=%s (%v) — using TCP connect scan\n", opts.ScanType, err)
+			srcIP = outboundIP(opts.Target)
+			if srcIP == nil {
+				fmt.Fprintf(os.Stderr, "[warn] Could not determine outbound source IP for --scan-type=%s — using TCP connect scan\n", opts.ScanType)
 				opts.ScanType = "connect"
 			} else {
-				defer rawScanner.Close()
-				go rawScanner.Listen(ctx)
+				var err error
+				rawScanner, err = utils.NewRawScanner(srcIP)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[warn] Failed to open raw socket for --scan-type=%s (%v) — using TCP connect scan\n", opts.ScanType, err)
+					opts.ScanType = "connect"
+				} else {
+					defer rawScanner.Close()
+					go rawScanner.Listen(ctx)
+				}
 			}
 		}
+	}
+
+	// Resolve decoy specs: substitute "ME" with outbound IP, validate IPv4.
+	var resolvedDecoys []string
+	if len(opts.Decoys) > 0 {
+		if rawScanner == nil {
+			fmt.Fprintln(os.Stderr, "[warn] Decoy scanning requires a raw socket (use a raw --scan-type) — skipping decoys")
+		} else {
+			for _, d := range opts.Decoys {
+				if d == "ME" {
+					if srcIP != nil {
+						resolvedDecoys = append(resolvedDecoys, srcIP.String())
+					}
+				} else if net.ParseIP(d).To4() != nil {
+					// Only accept valid IPv4 addresses; reject IPv6 and garbage.
+					resolvedDecoys = append(resolvedDecoys, d)
+				} else {
+					fmt.Fprintf(os.Stderr, "[warn] Decoy %q is not a valid IPv4 address — skipping\n", d)
+				}
+			}
+		}
+	}
+
+	if opts.Fragment && rawScanner == nil {
+		fmt.Fprintln(os.Stderr, "[warn] Packet fragmentation requires a raw socket (use a raw --scan-type) — skipping fragmentation")
 	}
 
 	summary.Total = len(ports)
@@ -137,7 +166,7 @@ func Run(ctx context.Context, opts Options) (ScanSummary, error) {
 				if err := rl.Wait(ctx); err != nil {
 					return
 				}
-				state := confirmPort(ctx, opts.Target, port, opts.Timeout, opts.Retry, opts.ScanType, rawScanner, opts.Decoys, opts.Fragment, opts.FragMTU)
+				state := confirmPort(ctx, opts.Target, port, opts.Timeout, opts.Retry, opts.ScanType, rawScanner, resolvedDecoys, opts.Fragment, opts.FragMTU)
 				if state == StateOpen || state == StateOpenFiltered {
 					r := PortResult{
 						Port:      port,
@@ -271,7 +300,12 @@ func confirmPort(ctx context.Context, target string, port int, timeout time.Dura
 
 // confirmPortRaw implements the real SYN/FIN/NULL/XMAS/ACK probe semantics
 // described above, using a shared RawScanner for send+correlate.
-func confirmPortRaw(ctx context.Context, target string, port int, timeout time.Duration, retry int, scanType string, raw *utils.RawScanner) PortState {
+//
+// If fragment is true, the TCP probe is sent as two IP fragments (splitting
+// the header at fragMTU bytes) so stateless IDS/IPS misses the TCP flags.
+// After sending the real probe, decoy packets (spoofed source IPs) are
+// fire-and-forgotten in shuffled order to obscure the true scanner IP.
+func confirmPortRaw(ctx context.Context, target string, port int, timeout time.Duration, retry int, scanType string, raw *utils.RawScanner, decoys []string, fragment bool, fragMTU int) PortState {
 	dstIP := net.ParseIP(target)
 	if dstIP == nil {
 		ips, err := net.LookupIP(target)
@@ -300,15 +334,38 @@ func confirmPortRaw(ctx context.Context, target string, port int, timeout time.D
 		flags = utils.FlagSYN
 	}
 
+	// Send the real probe (possibly fragmented).
 	var lastResult utils.RawProbeResult
 	for i := 0; i <= retry; i++ {
-		r, err := raw.Probe(ctx, dstIP, port, flags, timeout)
+		var r utils.RawProbeResult
+		var err error
+		if fragment {
+			r, err = raw.ProbeFragmented(ctx, dstIP, port, flags, timeout, fragMTU)
+		} else {
+			r, err = raw.Probe(ctx, dstIP, port, flags, timeout)
+		}
 		if err != nil {
 			return StateFiltered
 		}
 		lastResult = r
 		if r.GotResponse {
 			break
+		}
+	}
+
+	// Send decoy packets (spoofed source IPs, fire-and-forget).
+	// Shuffle order so no fixed pattern reveals which IP is real.
+	if len(decoys) > 0 {
+		shuffled := make([]string, len(decoys))
+		copy(shuffled, decoys)
+		evasion.ShuffleStrings(shuffled)
+		for _, decoy := range shuffled {
+			decoyIP := net.ParseIP(decoy)
+			if decoyIP != nil {
+				// SendSpoofedTCP validates IPv4 internally; ignore send errors
+				// (decoys are best-effort; a failed decoy doesn't affect accuracy).
+				_ = raw.SendSpoofedTCP(dstIP, decoyIP, port, flags)
+			}
 		}
 	}
 

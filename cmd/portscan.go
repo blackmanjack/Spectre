@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spectre-tool/spectre/internal/evasion"
 	"github.com/spectre-tool/spectre/internal/output"
 	"github.com/spectre-tool/spectre/internal/portscan"
 )
@@ -18,6 +19,7 @@ var portscanCmd = &cobra.Command{
 	Short: "Port scanner — 5-phase pipeline surpassing Nmap + RustScan",
 	Example: `  spectre portscan -t 192.168.1.1 --all-ports
   sudo spectre portscan -t 10.0.0.5 --all-ports --service --os --udp --timing aggressive
+  sudo spectre portscan -t 10.0.0.5 --scan-type syn --decoys "10.0.0.9,ME" --fragment
   spectre portscan -t 192.168.1.0/24 -p 1-10000 --top-ports 1000 -f json`,
 	RunE: runPortScan,
 }
@@ -37,6 +39,9 @@ var (
 	psRetry       int
 	psAdaptive    bool
 	psTiming      string
+	psDecoys      string
+	psFragment    bool
+	psFragMTU     int
 )
 
 func init() {
@@ -55,6 +60,9 @@ func init() {
 	f.IntVar(&psRetry, "retry", 2, "Retries per port")
 	f.BoolVar(&psAdaptive, "adaptive", true, "Enable adaptive rate control")
 	f.StringVar(&psTiming, "timing", "T4", "Timing template: T0-T5 or paranoid/sneaky/polite/normal/aggressive/insane")
+	f.StringVar(&psDecoys, "decoys", "", "Decoy source IPs to interleave (e.g. \"10.0.0.1,10.0.0.2,ME\"). Raw scan-type required.")
+	f.BoolVar(&psFragment, "fragment", false, "Split TCP header across two IP fragments (raw scan-type required; defeats stateless IDS/IPS signature matching)")
+	f.IntVar(&psFragMTU, "mtu", 8, "Bytes of TCP header in first IP fragment (must be a multiple of 8; minimum 8)")
 	_ = portscanCmd.MarkFlagRequired("target")
 	rootCmd.AddCommand(portscanCmd)
 }
@@ -68,6 +76,7 @@ func runPortScan(cmd *cobra.Command, args []string) error {
 	if globalAudit != nil {
 		_ = globalAudit.Log("portscan", psTarget, scopeFile, map[string]any{
 			"ports": psPorts, "all": psAllPorts, "service": psService, "os": psOS,
+			"decoys": psDecoys, "fragment": psFragment,
 		})
 		defer globalAudit.Close()
 	}
@@ -100,6 +109,9 @@ func runPortScan(cmd *cobra.Command, args []string) error {
 		Timeout:     time.Duration(psTimeout) * time.Millisecond,
 		RatePerSec:  psRate,
 		ScanType:    psScanType,
+		Decoys:      evasion.DecoyList(psDecoys),
+		Fragment:    psFragment,
+		FragMTU:     psFragMTU,
 		UDP:         psUDP,
 		Service:     psService,
 		OS:          psOS,

@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/spectre-tool/spectre/internal/evasion"
 	"github.com/spectre-tool/spectre/internal/output"
 	"github.com/spectre-tool/spectre/internal/utils"
 )
@@ -174,10 +175,21 @@ func fuzz(
 		defer close(work)
 		for word := range wordCh {
 			for _, path := range buildPaths(word, opts.Extensions) {
-				select {
-				case work <- path:
-				case <-ctx.Done():
-					return
+				// When WAF evasion is active, expand each canonical path into
+				// encoding/case/separator variants so filters on exact path
+				// matches are bypassed. Otherwise probe only the original path.
+				var paths []string
+				if opts.WafEvasion {
+					paths = evasion.PathMutations(path)
+				} else {
+					paths = []string{path}
+				}
+				for _, p := range paths {
+					select {
+					case work <- p:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
@@ -206,7 +218,9 @@ func fuzz(
 					}
 					headers := opts.ExtraHeaders
 					if opts.WafEvasion {
-						headers = wafHeaders(headers)
+						// Delegate to the evasion package's full 15-header set
+						// (replaces the old 8-header local copy).
+						headers = evasion.WAFBypassHeaders(headers)
 					}
 					r, err := probe(ctx, client, method, baseURL, path, headers)
 					if err != nil {
@@ -270,19 +284,4 @@ func isDirectory(r ProbeResult) bool {
 		!strings.Contains(r.Path, ".")
 }
 
-// wafHeaders injects WAF bypass headers into a request header map.
-func wafHeaders(base http.Header) http.Header {
-	h := base.Clone()
-	if h == nil {
-		h = make(http.Header)
-	}
-	h.Set("X-Forwarded-For", "127.0.0.1")
-	h.Set("X-Originating-IP", "127.0.0.1")
-	h.Set("X-Remote-IP", "127.0.0.1")
-	h.Set("X-Remote-Addr", "127.0.0.1")
-	h.Set("X-Original-URL", "/")
-	h.Set("X-Rewrite-URL", "/")
-	h.Set("X-Forwarded-Host", "localhost")
-	h.Set("X-Host", "localhost")
-	return h
-}
+
