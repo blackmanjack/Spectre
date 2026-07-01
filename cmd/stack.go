@@ -21,9 +21,10 @@ var stackCmd = &cobra.Command{
 }
 
 var (
-	stackTimeout       int
-	stackSkipTLS       bool
-	stackCheckMetadata bool
+	stackTimeout          int
+	stackSkipTLS          bool
+	stackCheckMetadata    bool
+	stackCheckFirebase    bool
 )
 
 func init() {
@@ -31,6 +32,7 @@ func init() {
 	f.IntVar(&stackTimeout, "timeout", 10, "Request timeout (seconds)")
 	f.BoolVar(&stackSkipTLS, "skip-tls", false, "Skip TLS verification")
 	f.BoolVar(&stackCheckMetadata, "check-metadata", false, "Also probe for misconfigured cloud-metadata SSRF exposure (active test — authorized targets only)")
+	f.BoolVar(&stackCheckFirebase, "check-firebase", false, "Also probe for Firebase misconfiguration: init.json exposure + unauthenticated Firestore/Realtime DB/Storage access (active test — authorized targets only)")
 	rootCmd.AddCommand(stackCmd)
 }
 
@@ -67,6 +69,9 @@ func runStack(cmd *cobra.Command, args []string) error {
 		if stackCheckMetadata {
 			fmt.Fprintf(os.Stderr, "[spectre] stack: --check-metadata enabled — active SSRF probe, authorized targets only\n")
 		}
+		if stackCheckFirebase {
+			fmt.Fprintf(os.Stderr, "[spectre] stack: --check-firebase enabled — active Firebase misconfiguration probe, authorized targets only\n")
+		}
 	}
 
 	return stack.Run(ctx, stack.Options{
@@ -74,6 +79,7 @@ func runStack(cmd *cobra.Command, args []string) error {
 		Timeout:       time.Duration(stackTimeout) * time.Second,
 		SkipTLS:       stackSkipTLS,
 		CheckMetadata: stackCheckMetadata,
+		CheckFirebase: stackCheckFirebase,
 		Writer:        writer,
 	})
 }

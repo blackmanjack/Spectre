@@ -1,0 +1,36 @@
+rules:
+  - id: spectre-sqli-concat-taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    metadata:
+      category: "SQL string concatenation"
+      engine: taint
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+    pattern-sinks:
+      - pattern: $DB.query($QUERY, ...)
+      - pattern: $DB.execute($QUERY, ...)
+    pattern-sanitizers:
+      - pattern: $DB.escape(...)
+      - pattern: mysql.escape(...)
+    message: >-
+      Request-controlled input flows into a SQL query/execute call with no visible
+      parameterization or escaping between source and sink.
+
+  - id: spectre-sqli-string-build
+    languages: [javascript, typescript]
+    severity: WARNING
+    mode: search
+    metadata:
+      category: "SQL string concatenation"
+    pattern-either:
+      - pattern: "'SELECT ' + ... "
+      - pattern: "\"SELECT \" + ... "
+      - pattern: "'... WHERE ' + ..."
+      - pattern: "\"... WHERE \" + ..."
+    message: >-
+      SQL keyword string literal immediately followed by string concatenation —
+      pattern match only, verify the concatenated value is parameterized.

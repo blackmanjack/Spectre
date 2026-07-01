@@ -461,13 +461,32 @@ spectre analyze <target> [flags]
 | `--max-file-size` | 10 | Per-file/per-URL read cap in MB |
 | `--categories` | `dom-xss,auth-bypass,sqli` | Comma list of detection categories to enable |
 | `--min-confidence` | 0 | Suppress findings below this confidence |
+| `--engine` | `regex` | Detection engine: `regex`, `semgrep`, or `both` |
+| `--semgrep-ruleset` | embedded | Override ruleset passed to `semgrep --config` (registry name like `p/javascript`, or a local YAML/dir path); default uses SPECTRE's built-in offline ruleset |
+| `--semgrep-timeout` | 60 | Timeout for the semgrep subprocess (seconds) |
 
 Scans JS/HTML/ASPX/ASP source for DOM XSS sinks, auth-bypass indicators, and
-SQL-injection-prone patterns — **pattern/proximity-based detection, not
-AST-level taint-flow analysis.** Every finding states it's a heuristic match
-requiring manual verification, never an assertion that a vulnerability is
-confirmed or exploitable. This is the same honesty standard already applied
-throughout SPECTRE (cf. `webtech`/`stack`'s leaked-error-message findings).
+SQL-injection-prone patterns. Two detection engines are available:
+
+- **`--engine regex`** (default) — proximity/heuristic based, zero external
+  dependencies, works offline. Every finding states it's a heuristic match
+  requiring manual verification. See confidence tiers below.
+- **`--engine semgrep`** — requires the `semgrep` binary on PATH
+  (`pip install semgrep`). Uses SPECTRE's embedded taint-mode rule set to
+  perform **real source-to-sink data-flow tracking**, not proximity heuristics.
+  Findings are tagged `[semgrep:taint-mode]` at confidence 95 (SPECTRE's own
+  taint rules) or `[semgrep:pattern]` at confidence 70 (search-mode rules).
+  Pass `--semgrep-ruleset p/javascript` to use Semgrep's broader public
+  registry ruleset instead of the embedded one.
+- **`--engine both`** — runs regex and semgrep sequentially, reports findings
+  from each engine independently (no deduplication between them). Useful for
+  seeing both the regex heuristic's output and the taint-flow confirmation
+  side-by-side.
+
+If `--engine semgrep` or `both` is requested but `semgrep` isn't on PATH,
+SPECTRE exits immediately with an actionable install message rather than
+silently falling back to regex — consistent with the "never misrepresent what
+actually ran" principle throughout this tool.
 
 `<target>` is auto-detected:
 - **Single file** — scanned directly.
@@ -506,11 +525,23 @@ from a line-count window to a ±200-byte window, and every finding's position
 is reported as a byte offset instead of a line number so a human can still
 locate the match in a single-line blob.
 
+**"How to test" guidance:** every finding (regex and semgrep) includes a
+concrete manual verification workflow in its `extra` field — specific browser
+devtools steps to confirm or refute the finding in the real application.
+This is explicitly framed as "next step to verify," not exploit automation:
+static analysis alone cannot prove exploitability (it doesn't know the app's
+runtime sanitization, server-side validation, or CSP headers), so the guidance
+tells you exactly how to check those things in a browser against an authorized
+target.
+
 **Example:**
 ```bash
 spectre analyze ./app.js
 spectre analyze ./src/ --categories dom-xss,sqli
 spectre analyze targets.txt --min-confidence 60 -f json -o findings.json
+spectre analyze ./app.js --engine semgrep                          # taint-flow analysis (requires semgrep)
+spectre analyze ./app.js --engine both --no-color                  # regex + semgrep side-by-side
+spectre analyze ./app.js --engine semgrep --semgrep-ruleset p/javascript   # use public registry ruleset
 ```
 
 ---
@@ -636,7 +667,9 @@ row stops matching reality, treat that as a bug report against the README.
 **`analyze`**
 | Feature | Status |
 |---|---|
-| DOM XSS / auth-bypass / SQLi detection | Pattern/proximity-based heuristics, not AST-level taint-flow analysis. Every finding's `Extra` field states it's a heuristic match requiring manual verification — SPECTRE never asserts a vulnerability is confirmed or exploitable from a regex match alone. |
+| `analyze` regex engine (DOM XSS / auth-bypass / SQLi) | Pattern/proximity-based heuristics — not AST-level taint-flow analysis. Every finding's `Extra` field states it's a heuristic match requiring manual verification. The `--engine semgrep` path upgrades this to real taint-flow tracking (see below). |
+| `analyze` semgrep engine (`--engine semgrep`) | Performs real source-to-sink taint-flow analysis using SPECTRE's embedded offline ruleset. Findings tagged `[semgrep:taint-mode]` at confidence 95 mean a taint-mode rule confirmed the data flow within the analyzed file; they still require manual verification in a browser to confirm exploitability (CSP, server-side sanitization, encoding are not visible in the JS file). `dataflow_trace` (Semgrep Pro-only field) is not relied on — confidence is derived from the rule's `mode: taint` + SPECTRE's own metadata convention, working on Semgrep OSS. |
+| `analyze` "how to test" guidance | Every finding (both engines) appends a concrete browser-devtools verification workflow to its `Extra` field — specific steps to confirm or refute the finding against a live, authorized target. This is manual-verification guidance, not exploit automation: static analysis cannot prove exploitability without runtime context (CSP, server-side validation, encoding). |
 | Minified JS handling | Heuristically detected (long average line length, or few lines for the byte size); detected files fall back from line-based to byte-offset-based proximity windows, with position always reported so a match can still be located in a single-line blob. |
 | Directory walk skip-list | Skips `node_modules`, `.git`, `vendor`, `bin`, `obj` by directory name — verified end-to-end (a planted finding inside `node_modules` does not appear in output). |
 

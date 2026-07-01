@@ -33,6 +33,9 @@ type Options struct {
 	// default — this actively tests for a specific misconfiguration class
 	// and should only run against targets you're authorized to test.
 	CheckMetadata bool
+	// CheckFirebase probes for Firebase misconfiguration: exposed init.json
+	// → unauthenticated Firestore/Realtime DB/Storage access. Off by default.
+	CheckFirebase bool
 	Writer        output.Writer
 }
 
@@ -102,6 +105,12 @@ func Run(ctx context.Context, opts Options) error {
 
 	if opts.CheckMetadata {
 		for _, f := range probeMetadataExposure(ctx, client, base, soft) {
+			emit(f)
+		}
+	}
+
+	if opts.CheckFirebase {
+		for _, f := range probeFirebaseMisconfig(ctx, client, base, soft) {
 			emit(f)
 		}
 	}
@@ -476,6 +485,144 @@ func probeMetadataExposure(ctx context.Context, client *http.Client, base string
 			})
 		}
 	}
+	return out
+}
+
+var firebaseProjectIDRe = regexp.MustCompile(`"projectId"\s*:\s*"([^"]+)"`)
+var firebaseAPIKeyRe = regexp.MustCompile(`"apiKey"\s*:\s*"([^"]+)"`)
+
+func probeFirebaseMisconfig(ctx context.Context, client *http.Client, base string, soft softFingerprint) []finding {
+	var out []finding
+
+	// Step 1: probe /__/firebase/init.json
+	initURL := base + "/__/firebase/init.json"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, initURL, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK || len(body) == 0 || soft.looksLikeSoftMatch(int64(len(body)), body) {
+		return nil
+	}
+
+	projectID := ""
+	if m := firebaseProjectIDRe.FindSubmatch(body); m != nil {
+		projectID = string(m[1])
+	}
+	if projectID == "" {
+		// not a real Firebase init.json
+		return nil
+	}
+
+	extra := fmt.Sprintf("/__/firebase/init.json exposed — projectId: %s", projectID)
+	if m := firebaseAPIKeyRe.FindSubmatch(body); m != nil {
+		extra += fmt.Sprintf(", apiKey: %s", string(m[1]))
+	}
+	out = append(out, finding{
+		source:     "vulnerability",
+		value:      "Firebase misconfiguration: init.json exposed",
+		confidence: 70,
+		extra:      extra + " — probe Firestore/Realtime DB/Storage for unauthenticated read access",
+	})
+
+	// Step 2: concurrently probe Firebase services for unauthenticated access
+	type serviceProbe struct {
+		name string
+		url  string
+	}
+
+	// Common Firestore collections to try if the root returns 404
+	collections := []string{"users", "customers", "loans", "surveys", "orders", "profiles", "transactions", "borrowers"}
+	firestoreBase := fmt.Sprintf("https://firestore.googleapis.com/v1/projects/%s/databases/(default)/documents/", projectID)
+
+	probes := []serviceProbe{
+		{"Firestore (users collection)", firestoreBase + "users"},
+		{"Realtime DB", fmt.Sprintf("https://%s-default-rtdb.firebaseio.com/.json?shallow=true", projectID)},
+		{"Cloud Storage", fmt.Sprintf("https://firebasestorage.googleapis.com/v0/b/%s.appspot.com/o", projectID)},
+	}
+
+	results := make([]finding, len(probes))
+	var wg sync.WaitGroup
+	for i, p := range probes {
+		wg.Add(1)
+		go func(i int, p serviceProbe) {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url, nil)
+			if err != nil {
+				return
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return
+			}
+			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+			resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK && len(respBody) > 2 {
+				results[i] = finding{
+					source:     "vulnerability",
+					value:      fmt.Sprintf("Firebase misconfiguration: unauthenticated %s access", p.name),
+					confidence: 90,
+					extra: fmt.Sprintf("GET %s returned HTTP 200 with data (%d bytes) — unauthenticated read confirmed on projectId: %s",
+						p.url, len(respBody), projectID),
+				}
+			}
+		}(i, p)
+	}
+	wg.Wait()
+
+	confirmedFirestore := false
+	for _, f := range results {
+		if f.value != "" {
+			out = append(out, f)
+			if strings.Contains(f.value, "Firestore") {
+				confirmedFirestore = true
+			}
+		}
+	}
+
+	// If Firestore users collection wasn't readable, try other common collections
+	if !confirmedFirestore {
+		for _, col := range collections[1:] { // skip "users" already tried
+			colResults := make([]finding, 1)
+			wg.Add(1)
+			go func(col string) {
+				defer wg.Done()
+				url := firestoreBase + col
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+				if err != nil {
+					return
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					return
+				}
+				respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK && len(respBody) > 2 {
+					colResults[0] = finding{
+						source:     "vulnerability",
+						value:      fmt.Sprintf("Firebase misconfiguration: unauthenticated Firestore (%s collection) access", col),
+						confidence: 90,
+						extra: fmt.Sprintf("GET %s returned HTTP 200 with data — unauthenticated read on projectId: %s",
+							url, projectID),
+					}
+				}
+			}(col)
+			wg.Wait()
+			if colResults[0].value != "" {
+				out = append(out, colResults[0])
+				break
+			}
+		}
+	}
+
 	return out
 }
 

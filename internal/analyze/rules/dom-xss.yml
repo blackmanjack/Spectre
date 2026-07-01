@@ -1,0 +1,69 @@
+rules:
+  - id: spectre-dom-xss-innerhtml-taint
+    languages: [javascript, typescript]
+    severity: WARNING
+    mode: taint
+    metadata:
+      category: "DOM XSS sink: innerHTML/outerHTML assignment"
+      engine: taint
+    pattern-sources:
+      - pattern: location.search
+      - pattern: location.hash
+      - pattern: document.referrer
+      - pattern: window.name
+      - pattern: new URLSearchParams(...)
+    pattern-sinks:
+      - pattern: $EL.innerHTML = $TAINT
+      - pattern: $EL.outerHTML = $TAINT
+      - pattern: $EL.insertAdjacentHTML($POS, $TAINT)
+      - pattern: document.write($TAINT)
+      - pattern: document.writeln($TAINT)
+    message: >-
+      Tainted value from a URL/DOM-controllable source flows into an HTML sink without a
+      visible sanitization step. Confirmed by Semgrep's taint engine, not a proximity guess.
+
+  - id: spectre-dom-xss-location-taint
+    languages: [javascript, typescript]
+    severity: WARNING
+    mode: taint
+    metadata:
+      category: "DOM XSS sink: location assignment"
+      engine: taint
+    pattern-sources:
+      - pattern: location.search
+      - pattern: location.hash
+      - pattern: window.name
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  window.onmessage = function ($EVT) { ... }
+              - pattern: |
+                  window.addEventListener("message", function ($EVT) { ... })
+          - focus-metavariable: $EVT
+    pattern-sinks:
+      - pattern: location.href = $TAINT
+      - pattern: location.replace($TAINT)
+      - pattern: location.assign($TAINT)
+    message: >-
+      Tainted value from a URL/postMessage source flows into a location
+      navigation sink without a visible origin/sanitization check.
+
+  - id: spectre-dom-xss-eval-taint
+    languages: [javascript, typescript]
+    severity: WARNING
+    mode: taint
+    metadata:
+      category: "DOM XSS sink: eval()"
+      engine: taint
+    pattern-sources:
+      - pattern: location.search
+      - pattern: location.hash
+      - pattern: document.referrer
+      - pattern: window.name
+    pattern-sinks:
+      - pattern: eval($TAINT)
+      - pattern: setTimeout($TAINT, ...)
+      - pattern: setInterval($TAINT, ...)
+    message: >-
+      Tainted value from a URL-controllable source flows into eval()/setTimeout()/setInterval()
+      with a string argument.

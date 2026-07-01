@@ -13,6 +13,9 @@ type finding struct {
 	extra      string
 }
 
+var openRedirectParams = regexp.MustCompile(
+	`(?i)[?&](?:back|redirect|url|next|return|goto|target|dest|destination|redir|continue|forward)=`)
+
 var domXSSSinks = []struct {
 	label string
 	re    *regexp.Regexp
@@ -70,6 +73,33 @@ func scanDOMXSS(body string) []finding {
 						" — no tainted source detected nearby, verify whether the value is attacker-controllable",
 				})
 			}
+		}
+	}
+	// Open redirect parameter detection
+	navSinkRe := domXSSSinks[5].re // "location assignment" sink
+	for _, loc := range openRedirectParams.FindAllStringIndex(body, -1) {
+		offset := loc[0]
+		window := win.around(offset)
+		pos := win.position(offset)
+		hasSink := navSinkRe.MatchString(window)
+		if hasSink {
+			out = append(out, finding{
+				category:   "Open redirect / javascript: URI parameter",
+				value:      "Open redirect / javascript: URI parameter",
+				confidence: 80,
+				position:   pos,
+				extra: "[tier 2: redirect param+navigation sink, " + pos + "] redirect/URL parameter found near location assignment" +
+					" — test ?param=https://external.example.com and ?param=javascript:alert(document.domain) in authorized environment",
+			})
+		} else {
+			out = append(out, finding{
+				category:   "Open redirect / javascript: URI parameter",
+				value:      "Open redirect / javascript: URI parameter",
+				confidence: 55,
+				position:   pos,
+				extra: "[tier 1: redirect param only, " + pos + "] redirect/URL parameter detected" +
+					" — trace whether value flows into a navigation sink (location.href/replace/assign)",
+			})
 		}
 	}
 	return out

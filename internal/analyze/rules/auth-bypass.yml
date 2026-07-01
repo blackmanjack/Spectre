@@ -1,0 +1,35 @@
+rules:
+  - id: spectre-auth-validaterequest-false
+    languages: [generic]
+    severity: ERROR
+    mode: search
+    metadata:
+      category: "ASPX ValidateRequest disabled"
+    pattern: ValidateRequest="false"
+    message: >-
+      ASPX Page directive sets ValidateRequest="false", disabling ASP.NET's
+      built-in request validation (XSS protection).
+
+  - id: spectre-auth-allow-anonymous
+    languages: [generic]
+    severity: WARNING
+    mode: search
+    metadata:
+      category: "AllowAnonymous attribute"
+    pattern: "[AllowAnonymous]"
+    message: >-
+      [AllowAnonymous] attribute found — verify this endpoint should genuinely
+      be unauthenticated.
+
+  - id: spectre-auth-client-role-check
+    languages: [javascript, typescript]
+    severity: WARNING
+    mode: search
+    metadata:
+      category: "Client-side-only role check"
+    pattern-either:
+      - pattern: if ($ROLE === "admin") { ... }
+      - pattern: if ($ROLE == "admin") { ... }
+    message: >-
+      Client-side role comparison — real authorization must happen
+      server-side; this check alone proves nothing about server enforcement.
